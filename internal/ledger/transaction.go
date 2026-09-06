@@ -13,11 +13,18 @@ import (
 type Platform string
 
 const (
-	PlatformDegiro        Platform = "degiro"
-	PlatformIBKR          Platform = "ibkr"
-	PlatformETRADE        Platform = "etrade"
-	PlatformN26           Platform = "n26"
-	PlatformTradeRepublic Platform = "traderepublic"
+	PlatformDegiro Platform = "degiro"
+	PlatformIBKR   Platform = "ibkr"
+	PlatformETRADE Platform = "etrade"
+
+	// PlatformManual marks a transaction nobody exported: it was typed
+	// in on the dashboard. Interest credits are the case that matters —
+	// a savings account's interest is DIRT-liable wherever it was paid,
+	// and which institution paid it changes no tax figure, so taxman
+	// doesn't model banks at all. The account's name is free text the
+	// user chooses, carried in Instrument so two accounts stay separable
+	// rows. See internal/ingest/interest.
+	PlatformManual Platform = "manual"
 )
 
 // Type identifies the kind of event a Transaction represents.

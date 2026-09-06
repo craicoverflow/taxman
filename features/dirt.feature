@@ -1,9 +1,11 @@
 Feature: Deposit Interest Retention Tax (DIRT)
 
   DIRT is charged on interest from deposit accounts. taxman totals the
-  hand-entered interest credits (N26, Trade Republic — neither has a
-  clean export) and applies the DIRT rate. No lots, no matching. Figures
-  produced by engine.ComputeDIRT / engine.ComputeDIRTForYear.
+  hand-entered interest credits — savings accounts have no clean export,
+  so the user types each credit in against an account they name — and
+  applies the DIRT rate. Which institution paid the interest changes
+  nothing: DIRT is DIRT. No lots, no matching. Figures produced by
+  engine.ComputeDIRT / engine.ComputeDIRTForYear.
 
   Rules pinned here (docs/maths.md section 9):
     * DIRT is "appropriate tax" under TCA 1997 s.256(1); guidance in

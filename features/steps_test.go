@@ -109,7 +109,7 @@ func addTx(ctx context.Context, typ ledger.Type, qty, instrument, price, currenc
 	}
 	platform := ledger.PlatformDegiro
 	if typ == ledger.TypeInterest {
-		platform = ledger.PlatformN26
+		platform = ledger.PlatformManual // hand-entered; no bank is modelled
 	}
 	h := w.holdingNamed(instrument)
 	h.txs = append(h.txs, ledger.Transaction{
@@ -143,7 +143,7 @@ func stepVestCcy(ctx context.Context, qty, instr, price, ccy, date string) error
 	return addTx(ctx, ledger.TypeRSUVest, qty, instr, price, ccy, date)
 }
 func stepInterest(ctx context.Context, amount, date string) error {
-	return addTx(ctx, ledger.TypeInterest, "1", "N26_SAVINGS", amount, "EUR", date)
+	return addTx(ctx, ledger.TypeInterest, "1", "Savings account", amount, "EUR", date)
 }
 
 // ---- When -----------------------------------------------------------

@@ -7,18 +7,18 @@ Source idea: [`docs/ideas/taxman.md`](docs/ideas/taxman.md). This spec reflects 
 ## 1. Objective
 
 ### Problem
-Replace a manually maintained spreadsheet with a trustworthy, self-hosted, always-on ledger that turns raw exports from Degiro, IBKR, ETRADE, and N26 into running DIRT, CGT, and exit-tax/deemed-disposal figures — with a full audit trail — without requiring a part-time tax analyst every January.
+Replace a manually maintained spreadsheet with a trustworthy, self-hosted, always-on ledger that turns raw exports from Degiro, IBKR and ETRADE — plus hand-entered savings interest — into running DIRT, CGT, and exit-tax/deemed-disposal figures — with a full audit trail — without requiring a part-time tax analyst every January.
 
 ### Target user
 Enda, personally. Single-user tool. Not designed, licensed, or hardened for anyone else's tax liability (see [§6 Boundaries](#6-boundaries) and Non-goals below).
 
 ### Success criteria
-- A single command starts a local web UI showing merged P&L and running tax liability (CGT / exit tax / DIRT) across all four platforms, computed from ingested CSV exports.
+- A single command starts a local web UI showing merged P&L and running tax liability (CGT / exit tax / DIRT) across every platform, computed from ingested CSV exports and hand-entered credits.
 - Every figure traceable via `internal/audit` resolves back to the specific source transactions and the specific versioned tax rule that produced it. (The live dashboard summary is a documented exception — see §7 — computed fresh on every request rather than persisted per view.)
 - The system flags any holding it cannot confidently classify (CGT asset vs. exit-tax fund) instead of guessing.
 - Re-uploading an export that overlaps previously ingested data does not double-count transactions.
 - Deemed-disposal anniversaries (8 years from each fund-lot acquisition) are tracked; surfacing them proactively in the UI is not yet built (see §9 Out of scope, and blocked task 4.9).
-- The dashboard shows P&L and liability visually (charts), not just as numbers, and N26 interest payments can be logged by hand without waiting on a PDF export (§7).
+- The dashboard shows P&L and liability visually (charts), not just as numbers, and savings interest can be logged by hand against any account the user names, without waiting on a PDF export (§7, §15).
 - A separate portfolio page answers "what is this worth today, and where am I up or down per position" from live market prices, in euro, degrading to last-known prices when offline (§9).
 - Output numbers are cross-checked against the existing hand-built spreadsheet and, where feasible, an independent Tax-Wizard run, before being trusted for filing.
 
@@ -52,7 +52,7 @@ Binary name: `taxman`. Single Go binary, `cmd/taxman/main.go` entrypoint, subcom
 | Command | Purpose |
 |---|---|
 | `taxman serve [--port 8080] [--db path]` | Starts the local HTTP server + dashboard UI against a SQLite DB. Default mode for day-to-day use. The dashboard (`/`) takes an optional `?year=YYYY` query param that scopes every figure (liability summary, holdings P&L, charts) to one calendar/Irish tax year; omitted means all years. The server also exposes `/portfolio` (§9), a live market-value view that ignores `?year=`. |
-| `taxman import <file> [--platform degiro\|ibkr\|etrade\|n26] [--dry-run]` | Ingests one CSV export. Auto-detects platform from header shape if `--platform` omitted; refuses to guess silently if detection is ambiguous. `--dry-run` reports what would be ingested/deduped without writing. |
+| `taxman import <file> [--platform degiro\|ibkr\|etrade] [--dry-run]` | Ingests one CSV export. Auto-detects platform from header shape if `--platform` omitted; refuses to guess silently if detection is ambiguous. `--dry-run` reports what would be ingested/deduped without writing. |
 | `taxman backfill <dir>` | One-time historical backfill: ingests every file in a directory (mixed platforms, auto-detected). Distinct from `import` so the operational difference between "loading history" and "adding this month's export" is explicit in the audit log. |
 | `taxman classify [--list-unclassified] [--set <isin> <CGT_ASSET\|EXIT_TAX_FUND>]` | Manages the holding classification override table. `--list-unclassified` surfaces anything blocking computation. |
 | `taxman report --year <YYYY> [--format text\|json]` | Generates a point-in-time report for a tax year: liability by category, audit trail references. `--format pdf` is not built (ask-first item, §6). Does not yet persist its own audit records (see `cmd/taxman/report.go`). |
@@ -90,9 +90,7 @@ taxman/
 │   │   ├── degiro/                 # Degiro Transactions + Account (cash-ledger) CSV parsers
 │   │   ├── ibkr/                   # IBKR CSV: flat trades export (real, FX via FXRateToBase — ADR 0002) + Activity Statement (unverified)
 │   │   ├── etrade/                 # ETRADE parser incl. RSU vest records; NewRSUVest manual entry (§11)
-│   │   ├── n26/                    # N26 interest: manual entry only (no clean CSV export — §7)
-│   │   ├── traderepublic/          # Trade Republic interest: manual entry only (§10)
-│   │   └── interest/               # registry of hand-entered interest sources (§10)
+│   │   └── interest/               # hand-entered interest credits, account named by the user (§7, §10, §15)
 │   ├── classify/                  # holding classification + manual override table
 │   ├── taxrules/                  # versioned rates/rules by effective date
 │   ├── engine/                    # FIFO lot matching, CGT/DIRT/exit-tax computation, deemed-disposal clock
@@ -186,7 +184,7 @@ taxman/
 
 ## 7. Feature: Dashboard Charts & Manual Interest Entry
 
-**Status:** built (2026-09-05).
+**Status:** built (2026-09-05). The manual-interest half is **superseded by §15** (charts are unchanged): interest is no longer tied to a named bank. Kept as the record of what was built at the time.
 
 ### Objective
 The dashboard (`internal/web`) rendered P&L and liability as plain HTML tables/text. This pass replaced the two figures that matter most for at-a-glance use with charts, and closed a real gap: `internal/ingest/n26.NewInterestCredit` existed but was wired to no CLI command or HTTP route, so there was no way to record an N26 interest payment at all (N26 has no clean CSV export — manual entry is the only path, by design, not a stopgap).
@@ -292,7 +290,7 @@ The dashboard answers "what do I owe". It never answers "what is this worth toda
 ### Out of scope (this pass)
 - Historical portfolio-value-over-time (any time series) — deferred (§1, §6).
 - Intraday auto-refresh, websockets, server push — page is accurate as of last load.
-- Pricing cash, N26 savings, deposits, or any interest-bearing balance — no market price exists; these never appear.
+- Pricing cash, savings, deposits, or any interest-bearing balance — no market price exists; these never appear.
 - Auto-guessing a ticker from instrument name or ISIN — user-entered mappings only (§6).
 - Any change to `internal/taxrules` or `internal/audit`. Quotes are never persisted as audit records and never feed tax computation.
 - Any change to `internal/engine` **beyond one additive, read-only function**: `engine.OpenPositions(txs) (OpenPosition, error)`, returning the still-held quantity and the FIFO cost basis of the remaining lots for one instrument. The FIFO matcher already computes lot `Remaining` internally and discards it; this exposes it. No tax-rule logic, no rate lookup, no new golden fixture — a unit test over buy/sell sequences (quantity conserved, basis = sum of surviving lots) is sufficient. The portfolio page calls it; no lot-matching logic lives in `internal/web`.
@@ -339,7 +337,7 @@ EUR conversion reuses `fx.Rate(currency, time.Now())`; monetary output is `€`,
 
 ## 10. Feature: Multi-source manual interest entry
 
-**Status:** built (2026-09-06). Resolves §7's "ask first before extending interest entry beyond N26" item.
+**Status:** built (2026-09-06). Resolves §7's "ask first before extending interest entry beyond N26" item. **Superseded by §15** — the source registry described below was replaced by a free-text, user-named account. This section is kept as the record of what was built at the time; §15 is the current shape.
 
 ### Objective
 The "Log interest payment" form only ever produced an N26 credit. Other savings accounts pay DIRT-liable interest with no clean CSV export either — Trade Republic first — and needed the same manual path.
@@ -481,6 +479,34 @@ executable scenarios that prove the code matches the document.
 
 ---
 
+## 15. Feature: User-named interest accounts
+
+**Status:** built (2026-09-06). Supersedes the source registry of §10 and the N26-specific entry path of §7.
+
+### Objective
+DIRT is DIRT. TCA 1997 s.256 charges it on deposit interest without regard to which institution paid it, and `engine.ComputeDIRT` has always summed every `interest`-type credit regardless of platform. Modelling banks in the code was therefore pure cost: each new savings account meant a new `ledger.Platform`, a new `internal/ingest/<bank>` package, and a registry entry — all to change no tax figure. Worse, the set of banks a user holds is personal data baked into a public repo. The account is now named by the user, in free text, and taxman knows nothing about banks.
+
+### Shape
+- `ledger.PlatformN26` and `ledger.PlatformTradeRepublic` are gone, replaced by a single `ledger.PlatformManual` (`"manual"`) — "nobody exported this; it was typed in". `internal/ingest/n26` and `internal/ingest/traderepublic` are deleted.
+- `internal/ingest/interest` is no longer a registry. It is one constructor, `NewCredit(source, date, amount)`: `source` is the user's own name for the account, normalized (trimmed, internal whitespace collapsed) and stored in the transaction's `Instrument`. Currency stays fixed to `EUR`, quantity `1`, the credited amount in `Price`, as before.
+- Carrying the name in `Instrument` keeps two accounts separable on the dashboard and — because `Instrument` feeds the fingerprint — makes two banks paying the same amount on the same day two credits rather than one duplicate. Interest credits are still excluded from the holdings table, so a savings account never becomes an `UNCLASSIFIED` holding.
+- The dashboard's source `<select>` becomes a required free-text input backed by a `<datalist>` of names already used (`ledger.Store.ManualInterestSources`), so a repeat entry needn't be retyped exactly but an unseen name is an ordinary entry, not a `400`. An empty or whitespace-only name is a `400` — it is the only thing telling one account's credits from another's.
+- `POST /interest/update` now corrects the account name alongside the date and amount (`UpdateManualInterestCredit` rewrites `instrument` and recomputes the fingerprint), because a free-text field will collect typos and there is otherwise no way to fix one.
+- `ledger.Store`'s editable/deletable query matches `platform = 'manual'` rather than a list of bank platforms.
+- **Migration 0007** rewrites existing credits: platform → `manual`, instrument `N26_SAVINGS` → `N26` and `TRADE_REPUBLIC_SAVINGS` → `Trade Republic`, i.e. the old bank names survive as ordinary user-chosen names. Both columns feed the fingerprint, so it is recomputed in SQL via `sha256_hex`, a deterministic scalar function registered on the driver by `internal/db`; a test pins that expression against `ledger.Transaction.Fingerprint`. Without it a migrated credit would stop deduping against a re-entry of itself. The down migration reverses those two names only — a credit logged since under a user-chosen name has no pre-0007 platform and is deliberately left as `manual`.
+
+### Out of scope
+- Non-EUR interest — unchanged from §10; `ComputeDIRT` still requires EUR.
+- Per-account DIRT breakdown on the dashboard — the DIRT line stays one combined figure, because it is one tax.
+- Any managed list of accounts (a table, add/rename/delete UI). The name on the credit is the whole model; renaming an account means correcting its credits.
+- A CSV/PDF parser for any savings account — still manual entry only, by design.
+
+### Boundaries specific to this feature
+- **Always:** keep the migration's fingerprint expression pinned to `ledger.Transaction.Fingerprint` by test. Any future migration that rewrites a fingerprint-feeding column must recompute the fingerprint the same way.
+- **Never:** reintroduce a hard-coded list of institutions, or infer one from a name the user typed. No tax rule turns on it, and it puts personal data in the source tree.
+
+---
+
 ## Traceability
 
 | Idea doc item | Resolved here |
@@ -501,3 +527,4 @@ executable scenarios that prove the code matches the document.
 | Privacy toggle (blur money figures) | §12, built 2026-09-06. Nav "Blur €" button, `localStorage`-persisted, blurs every `.money` span + chart canvas. |
 | Portfolio P&L percentage | §13, built 2026-09-06. Extends §9 — signed % of market value vs cost basis, per holding and total. |
 | Output numbers cross-checked / verifiable by an accountant | §14, built 2026-09-06. `docs/maths.md` prose reference with Irish citations + `features/*.feature` (godog) executable, engine-pinned worked examples + CI drift gate. |
+| User-named interest accounts | §15, built 2026-09-06. Supersedes §10's source registry — DIRT does not turn on which bank paid, so no bank is modelled. Migration 0007 carries existing credits across. |

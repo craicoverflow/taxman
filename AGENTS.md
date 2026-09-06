@@ -118,10 +118,11 @@ The pipeline, all in `internal/engine`, operating on immutable
      be wrong in that window; blocked pending a Revenue TDM citation
      (task 4.8), same loud-failure discipline as deemed disposal.
 3. **DIRT** is separate — no lots. `ComputeDIRT` sums
-   `interest`-type credits (hand-entered savings interest — N26, Trade
-   Republic; see `internal/ingest/interest`) and applies the DIRT rate
-   at the latest credit's date (33% from 2020; earlier years resolve
-   to their own rate — see step 4). Interest must be EUR.
+   `interest`-type credits (hand-entered savings interest, against an
+   account the user names; see `internal/ingest/interest`) and applies
+   the DIRT rate at the latest credit's date (33% from 2020; earlier
+   years resolve to their own rate — see step 4). Interest must be
+   EUR. No bank is modelled: DIRT does not turn on who paid it.
 4. **Rate + exemption lookup.** `internal/taxrules` holds every rate as
    an **effective-dated schedule**, never a bare constant in `engine`:
 
@@ -178,8 +179,7 @@ internal/
     route.go           platform auto-detection from CSV header shape
     degiro/ ibkr/ etrade/        one parser per platform (independent formats)
     etrade/                      also NewRSUVest — hand-entered vest (POST /rsu)
-    n26/ traderepublic/          hand-entered interest only (no clean export)
-    interest/                    registry of hand-entered interest sources
+    interest/                    hand-entered interest credits, account named by the user
   classify/            CGT_ASSET / EXIT_TAX_FUND / UNCLASSIFIED override table
   taxrules/            effective-dated rate & exemption schedules + env overrides
   engine/              FIFO lot matching, CGT / exit-tax / DIRT, deemed-disposal clock, OpenPositions
@@ -332,7 +332,7 @@ whole-euro rounding, and audit records; **year-level CGT aggregation**
 (`AggregateCGTYear`: one exemption/year, cross-holding loss netting,
 loss carry-forward) + per-year exit-tax/DIRT + `report`;
 deemed-disposal **date** clock; dashboard with charts, hand-entered
-interest entry (N26, Trade Republic), hand-entered RSU vests
+interest entry (user-named accounts), hand-entered RSU vests
 (`POST /rsu`), a tax-year selector, and a nav "Blur €" privacy
 toggle (blurs every money figure, strips chart value-axes/tooltips,
 `localStorage`-persisted, reloads on toggle);

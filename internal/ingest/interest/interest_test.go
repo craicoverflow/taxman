@@ -6,68 +6,109 @@ import (
 	"github.com/craicoverflow/taxman/internal/ledger"
 )
 
-func TestSources_ListsN26AndTradeRepublicInPickerOrder(t *testing.T) {
-	got := Sources()
-	if len(got) != 2 {
-		t.Fatalf("expected 2 sources, got %d: %+v", len(got), got)
+func TestNewCredit_BuildsEURManualCreditNamedByTheUser(t *testing.T) {
+	tx, err := NewCredit("Rainy day", "2024-05-01", "12.34")
+	if err != nil {
+		t.Fatalf("NewCredit: %v", err)
 	}
-	if got[0].Key != "n26" || got[1].Key != "traderepublic" {
-		t.Errorf("unexpected source order: %s, %s", got[0].Key, got[1].Key)
+	if tx.Platform != ledger.PlatformManual {
+		t.Errorf("Platform = %q, want %q", tx.Platform, ledger.PlatformManual)
 	}
-	// Sources returns a copy — mutating it must not affect the registry.
-	got[0].Label = "mutated"
-	if Sources()[0].Label != "N26" {
-		t.Errorf("Sources() leaked its backing slice")
+	if tx.Type != ledger.TypeInterest {
+		t.Errorf("Type = %q, want interest", tx.Type)
 	}
-}
-
-func TestSourceByKey(t *testing.T) {
-	if s, err := SourceByKey(""); err != nil || s.Key != Default.Key {
-		t.Errorf(`SourceByKey("") = (%+v, %v), want the default source`, s, err)
+	if tx.Instrument != "Rainy day" {
+		t.Errorf("Instrument = %q, want the source name verbatim", tx.Instrument)
 	}
-	if s, err := SourceByKey("traderepublic"); err != nil || s.Platform != ledger.PlatformTradeRepublic {
-		t.Errorf(`SourceByKey("traderepublic") = (%+v, %v)`, s, err)
+	if tx.Currency != "EUR" {
+		t.Errorf("Currency = %q, want EUR", tx.Currency)
 	}
-	if _, err := SourceByKey("revolut"); err == nil {
-		t.Error(`SourceByKey("revolut") should error on an unknown source, not fall back`)
+	if tx.Quantity.String() != "1" {
+		t.Errorf("Quantity = %s, want 1", tx.Quantity)
 	}
-}
-
-func TestSourceForPlatform(t *testing.T) {
-	if s, ok := SourceForPlatform(ledger.PlatformN26); !ok || s.Key != "n26" {
-		t.Errorf("SourceForPlatform(n26) = (%+v, %v)", s, ok)
+	if tx.Price.String() != "12.34" {
+		t.Errorf("Price = %s, want the full credited amount", tx.Price)
 	}
-	if _, ok := SourceForPlatform(ledger.PlatformDegiro); ok {
-		t.Error("SourceForPlatform(degiro) should report no manual-interest source")
+	if tx.Date.Format("2006-01-02") != "2024-05-01" {
+		t.Errorf("Date = %s, want 2024-05-01", tx.Date)
 	}
 }
 
-func TestSource_NewCredit_BuildsEURCreditForItsPlatform(t *testing.T) {
-	for _, src := range Sources() {
-		tx, err := src.NewCredit("2024-05-01", "12.34")
+func TestNewCredit_AnySourceNameIsAccepted(t *testing.T) {
+	// There is no registry of banks: whatever the user calls the
+	// account is the account.
+	for _, name := range []string{"Revolut", "An Post", "credit union #2", "Mam's account"} {
+		tx, err := NewCredit(name, "2024-05-01", "1.00")
 		if err != nil {
-			t.Fatalf("%s NewCredit: %v", src.Key, err)
+			t.Errorf("NewCredit(%q): %v", name, err)
+			continue
 		}
-		if tx.Platform != src.Platform {
-			t.Errorf("%s: Platform = %q, want %q", src.Key, tx.Platform, src.Platform)
-		}
-		if tx.Type != ledger.TypeInterest {
-			t.Errorf("%s: Type = %q, want interest", src.Key, tx.Type)
-		}
-		if tx.Currency != "EUR" {
-			t.Errorf("%s: Currency = %q, want EUR", src.Key, tx.Currency)
-		}
-		if tx.Instrument == "" {
-			t.Errorf("%s: Instrument is empty", src.Key)
+		if tx.Instrument != name {
+			t.Errorf("NewCredit(%q): Instrument = %q", name, tx.Instrument)
 		}
 	}
 }
 
-func TestSource_NewCredit_PropagatesValidationErrors(t *testing.T) {
-	if _, err := Default.NewCredit("not-a-date", "12.34"); err == nil {
-		t.Error("expected NewCredit to surface a malformed-date error")
+func TestNewCredit_SourceIsNormalizedSoLookalikesAreOneAccount(t *testing.T) {
+	spaced, err := NewCredit("  Rainy   day ", "2024-05-01", "12.34")
+	if err != nil {
+		t.Fatalf("NewCredit: %v", err)
 	}
-	if _, err := Default.NewCredit("2024-05-01", "-1"); err == nil {
-		t.Error("expected NewCredit to surface a non-positive-amount error")
+	tidy, err := NewCredit("Rainy day", "2024-05-01", "12.34")
+	if err != nil {
+		t.Fatalf("NewCredit: %v", err)
+	}
+	if spaced.Instrument != tidy.Instrument {
+		t.Errorf("Instrument = %q and %q, want one normalized name", spaced.Instrument, tidy.Instrument)
+	}
+	if spaced.Fingerprint() != tidy.Fingerprint() {
+		t.Error("the same credit typed with stray spaces must not become a second ledger row")
+	}
+}
+
+func TestNewCredit_DifferentSourcesAreDistinctCredits(t *testing.T) {
+	// Same date, same amount, different account — two real credits,
+	// not one duplicate.
+	a, err := NewCredit("Revolut", "2024-05-01", "12.34")
+	if err != nil {
+		t.Fatalf("NewCredit: %v", err)
+	}
+	b, err := NewCredit("An Post", "2024-05-01", "12.34")
+	if err != nil {
+		t.Fatalf("NewCredit: %v", err)
+	}
+	if a.Fingerprint() == b.Fingerprint() {
+		t.Error("credits from two different accounts share a fingerprint")
+	}
+}
+
+func TestNewCredit_RejectsBadInput(t *testing.T) {
+	cases := []struct {
+		name             string
+		source, date, am string
+	}{
+		{"empty source", "", "2024-05-01", "12.34"},
+		{"whitespace-only source", "   ", "2024-05-01", "12.34"},
+		{"malformed date", "Revolut", "not-a-date", "12.34"},
+		{"non-positive amount", "Revolut", "2024-05-01", "-1"},
+		{"zero amount", "Revolut", "2024-05-01", "0"},
+		{"malformed amount", "Revolut", "2024-05-01", "twelve"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := NewCredit(c.source, c.date, c.am); err == nil {
+				t.Error("expected an error")
+			}
+		})
+	}
+}
+
+func TestNewCredit_RejectsAnOverlongSource(t *testing.T) {
+	long := make([]byte, MaxSourceLen+1)
+	for i := range long {
+		long[i] = 'a'
+	}
+	if _, err := NewCredit(string(long), "2024-05-01", "12.34"); err == nil {
+		t.Error("expected an over-length source to be rejected")
 	}
 }

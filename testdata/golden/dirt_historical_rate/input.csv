@@ -1,2 +1,2 @@
 platform,type,date,instrument,quantity,price,currency
-n26,interest,2018-06-01,N26_SAVINGS,1,500,EUR
+manual,interest,2018-06-01,Savings account,1,500,EUR

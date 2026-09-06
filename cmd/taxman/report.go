@@ -187,8 +187,8 @@ func buildYearReport(conn *sql.DB, year int) (*yearReport, error) {
 
 		// DIRT is orthogonal to CGT/exit-tax classification — any
 		// holding's transactions may include interest credits (in
-		// practice N26's savings "holding" is the only one that will,
-		// but nothing in the domain model restricts it structurally).
+		// practice only a hand-entered savings account will, but
+		// nothing in the domain model restricts it structurally).
 		if interest, hasInterest := reportYearDIRT(holdingTxs, year); hasInterest {
 			holding.Interest = interest.String()
 			if holding.kind == "" {

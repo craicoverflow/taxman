@@ -574,8 +574,8 @@ func TestHandler_Dashboard_ShowsDIRTSummaryForInterest(t *testing.T) {
 	store := ledger.NewStore(conn)
 
 	interest := ledger.Transaction{
-		Platform: ledger.PlatformN26, Type: ledger.TypeInterest,
-		Date: mustDate(t, "2024-06-01"), Instrument: "N26-SAVINGS",
+		Platform: ledger.PlatformManual, Type: ledger.TypeInterest,
+		Date: mustDate(t, "2024-06-01"), Instrument: "Rainy day",
 		Quantity: decimal.NewFromInt(1), Price: mustDecimal(t, "100"), Currency: "EUR",
 	}
 	if _, err := store.Insert(interest); err != nil {
@@ -927,8 +927,12 @@ func TestHandler_Dashboard_PnLChartData_ExcludesHoldingWithComputeError(t *testi
 	}
 }
 
+// testAccount is the account name the single-account interest tests
+// log against. Any name would do — that is the point of the field.
+const testAccount = "Rainy day"
+
 func newInterestRequest(date, amount string) *http.Request {
-	form := url.Values{"date": {date}, "amount": {amount}}
+	form := url.Values{"source": {testAccount}, "date": {date}, "amount": {amount}}
 	req := httptest.NewRequest(http.MethodPost, "/interest", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return req
@@ -975,8 +979,11 @@ func TestHandler_Interest_POST_InsertsInterestTransaction(t *testing.T) {
 	if tx.Type != ledger.TypeInterest {
 		t.Errorf("Type = %q, want %q", tx.Type, ledger.TypeInterest)
 	}
-	if tx.Platform != ledger.PlatformN26 {
-		t.Errorf("Platform = %q, want %q", tx.Platform, ledger.PlatformN26)
+	if tx.Platform != ledger.PlatformManual {
+		t.Errorf("Platform = %q, want %q", tx.Platform, ledger.PlatformManual)
+	}
+	if tx.Instrument != testAccount {
+		t.Errorf("Instrument = %q, want the account name %q", tx.Instrument, testAccount)
 	}
 	if !tx.Price.Equal(mustDecimal(t, "12.34")) {
 		t.Errorf("Price = %s, want 12.34", tx.Price)
@@ -989,12 +996,14 @@ func TestHandler_Interest_POST_InsertsInterestTransaction(t *testing.T) {
 	}
 }
 
-func TestHandler_Interest_POST_TradeRepublicSource_InsertsTradeRepublicCredit(t *testing.T) {
+func TestHandler_Interest_POST_AnyAccountNameIsAccepted(t *testing.T) {
+	// taxman keeps no list of banks: a name it has never seen is a
+	// normal entry, not an error.
 	conn := openMigratedTestDB(t)
 	handler := NewServer(conn).Handler()
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, newInterestRequestFromSource("traderepublic", "2024-07-01", "37.50"))
+	handler.ServeHTTP(rec, newInterestRequestFromSource("An Post deposit", "2024-07-01", "37.50"))
 
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusSeeOther, rec.Body.String())
@@ -1008,8 +1017,11 @@ func TestHandler_Interest_POST_TradeRepublicSource_InsertsTradeRepublicCredit(t 
 		t.Fatalf("len(txs) = %d, want 1", len(txs))
 	}
 	tx := txs[0]
-	if tx.Platform != ledger.PlatformTradeRepublic {
-		t.Errorf("Platform = %q, want %q", tx.Platform, ledger.PlatformTradeRepublic)
+	if tx.Platform != ledger.PlatformManual {
+		t.Errorf("Platform = %q, want %q", tx.Platform, ledger.PlatformManual)
+	}
+	if tx.Instrument != "An Post deposit" {
+		t.Errorf("Instrument = %q, want the account name as typed", tx.Instrument)
 	}
 	if tx.Type != ledger.TypeInterest {
 		t.Errorf("Type = %q, want interest", tx.Type)
@@ -1026,7 +1038,7 @@ func TestHandler_Interest_POST_BatchLogsEveryFilledRowForOneSource(t *testing.T)
 	// Three filled rows interleaved with blank grid rows that must be
 	// ignored, not rejected.
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, newInterestBatchRequest("traderepublic",
+	handler.ServeHTTP(rec, newInterestBatchRequest("An Post deposit",
 		[]string{"2024-01-31", "", "2024-02-29", "", "2024-03-31"},
 		[]string{"10.01", "", "10.02", "", "10.03"},
 	))
@@ -1042,8 +1054,8 @@ func TestHandler_Interest_POST_BatchLogsEveryFilledRowForOneSource(t *testing.T)
 		t.Fatalf("expected 3 logged credits, got %d", len(credits))
 	}
 	for _, ic := range credits {
-		if ic.Platform != ledger.PlatformTradeRepublic {
-			t.Errorf("credit %d: Platform = %q, want traderepublic", ic.ID, ic.Platform)
+		if ic.Instrument != "An Post deposit" {
+			t.Errorf("credit %d: Instrument = %q, want the batch's account", ic.ID, ic.Instrument)
 		}
 	}
 }
@@ -1053,7 +1065,7 @@ func TestHandler_Interest_POST_Batch_OneInvalidRow_WritesNothing(t *testing.T) {
 	handler := NewServer(conn).Handler()
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, newInterestBatchRequest("n26",
+	handler.ServeHTTP(rec, newInterestBatchRequest(testAccount,
 		[]string{"2024-01-31", "2024-02-29", "2024-03-31"},
 		[]string{"10.00", "not-a-number", "12.00"},
 	))
@@ -1075,7 +1087,7 @@ func TestHandler_Interest_POST_Batch_AllRowsBlank_Returns400(t *testing.T) {
 	handler := NewServer(conn).Handler()
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, newInterestBatchRequest("n26",
+	handler.ServeHTTP(rec, newInterestBatchRequest(testAccount,
 		[]string{"", "", ""},
 		[]string{"", "", ""},
 	))
@@ -1089,7 +1101,7 @@ func TestHandler_Interest_POST_Batch_RowMissingAmount_Returns400(t *testing.T) {
 	handler := NewServer(conn).Handler()
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, newInterestBatchRequest("n26",
+	handler.ServeHTTP(rec, newInterestBatchRequest(testAccount,
 		[]string{"2024-01-31"},
 		[]string{""},
 	))
@@ -1098,22 +1110,27 @@ func TestHandler_Interest_POST_Batch_RowMissingAmount_Returns400(t *testing.T) {
 	}
 }
 
-func TestHandler_Interest_POST_UnknownSource_ReturnsErrorAndWritesNothing(t *testing.T) {
+func TestHandler_Interest_POST_MissingAccount_ReturnsErrorAndWritesNothing(t *testing.T) {
+	// The account name is the only thing distinguishing one savings
+	// account's credits from another's, so it can't be blank.
 	conn := openMigratedTestDB(t)
 	handler := NewServer(conn).Handler()
 
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, newInterestRequestFromSource("revolut", "2024-07-01", "10.00"))
+	for _, source := range []string{"", "   "} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, newInterestRequestFromSource(source, "2024-07-01", "10.00"))
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("source %q: status = %d, want %d", source, rec.Code, http.StatusBadRequest)
+		}
 	}
+
 	txs, err := ledger.NewStore(conn).All()
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
 	if len(txs) != 0 {
-		t.Errorf("len(txs) = %d, want 0 after a rejected unknown-source request", len(txs))
+		t.Errorf("len(txs) = %d, want 0 after a rejected unnamed-account request", len(txs))
 	}
 }
 
@@ -1179,7 +1196,7 @@ func TestHandler_Interest_GET_NotAllowed(t *testing.T) {
 }
 
 func newInterestUpdateRequest(id int64, date, amount string) *http.Request {
-	form := url.Values{"id": {strconv.FormatInt(id, 10)}, "date": {date}, "amount": {amount}}
+	form := url.Values{"id": {strconv.FormatInt(id, 10)}, "source": {testAccount}, "date": {date}, "amount": {amount}}
 	req := httptest.NewRequest(http.MethodPost, "/interest/update", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return req
@@ -1340,27 +1357,31 @@ func TestHandler_Dashboard_ListsLoggedInterestCreditsWithEditAndDelete(t *testin
 	}
 }
 
-func TestHandler_Dashboard_InterestLog_ShowsSourcePerCreditAndPicker(t *testing.T) {
+func TestHandler_Dashboard_InterestLog_ShowsAccountPerCreditAndSuggestsKnownOnes(t *testing.T) {
 	conn := openMigratedTestDB(t)
 	handler := NewServer(conn).Handler()
 
-	handler.ServeHTTP(httptest.NewRecorder(), newInterestRequestFromSource("n26", "2024-06-15", "12.34"))
-	handler.ServeHTTP(httptest.NewRecorder(), newInterestRequestFromSource("traderepublic", "2024-07-15", "56.78"))
+	handler.ServeHTTP(httptest.NewRecorder(), newInterestRequestFromSource("Rainy day", "2024-06-15", "12.34"))
+	handler.ServeHTTP(httptest.NewRecorder(), newInterestRequestFromSource("An Post deposit", "2024-07-15", "56.78"))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/?year=", nil))
 	body := rec.Body.String()
 
 	for _, want := range []string{
-		`<select name="source">`,                                    // the entry-form picker
-		`<option value="traderepublic">Trade Republic`,              // both sources offered
-		`<th>Source</th>`,                                           // the log's new column
-		`<input type="hidden" name="source" value="traderepublic">`, // edit form echoes the row's source
-		`<input type="hidden" name="source" value="n26">`,
+		`name="source" list="interest-sources"`,     // free text, not a fixed picker
+		`<datalist id="interest-sources">`,          // with suggestions
+		`<option value="An Post deposit"></option>`, // both names already used are suggested
+		`<option value="Rainy day"></option>`,
+		`<th>Account</th>`,                  // the log's account column
+		`value="An Post deposit" required>`, // each row's account is editable in place
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected dashboard body to contain %q\ngot: %s", want, body)
 		}
+	}
+	if strings.Contains(body, `<select name="source">`) {
+		t.Error("the account field must be free text, not a fixed list of institutions")
 	}
 }
 
@@ -1373,8 +1394,8 @@ func TestHandler_Dashboard_InterestCredit_DoesNotAppearAsHolding(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := rec.Body.String()
 
-	if strings.Contains(body, "N26_SAVINGS") {
-		t.Errorf("interest instrument N26_SAVINGS should not appear in the holdings table; got: %s", body)
+	if strings.Contains(body, ">"+testAccount+" ") || strings.Contains(body, ">"+testAccount+"<") {
+		t.Errorf("the interest account %q should not appear in the holdings table; got: %s", testAccount, body)
 	}
 	if strings.Contains(body, "UNCLASSIFIED") {
 		t.Errorf("an interest-only ledger should have no UNCLASSIFIED holding; got: %s", body)
@@ -1849,7 +1870,7 @@ func portfolioSeed(t *testing.T, conn *sql.DB) {
 		{Platform: ledger.PlatformDegiro, Type: ledger.TypeSell, Date: mustDate(t, "2024-02-01"), Instrument: "US0378331005", Description: "APPLE INC", Quantity: decimal.NewFromInt(4), Price: decimal.NewFromInt(150), Currency: "EUR"},
 		{Platform: ledger.PlatformDegiro, Type: ledger.TypeBuy, Date: mustDate(t, "2023-03-01"), Instrument: "IE00B3RBWM25", Description: "VANGUARD FTSE AW", Quantity: decimal.NewFromInt(5), Price: decimal.NewFromInt(80), Currency: "EUR"},
 		{Platform: ledger.PlatformDegiro, Type: ledger.TypeSell, Date: mustDate(t, "2024-04-01"), Instrument: "IE00B3RBWM25", Description: "VANGUARD FTSE AW", Quantity: decimal.NewFromInt(5), Price: decimal.NewFromInt(90), Currency: "EUR"},
-		{Platform: ledger.PlatformN26, Type: ledger.TypeInterest, Date: mustDate(t, "2024-05-01"), Instrument: "N26_SAVINGS", Quantity: decimal.NewFromInt(1), Price: decimal.NewFromInt(25), Currency: "EUR"},
+		{Platform: ledger.PlatformManual, Type: ledger.TypeInterest, Date: mustDate(t, "2024-05-01"), Instrument: "Rainy day", Quantity: decimal.NewFromInt(1), Price: decimal.NewFromInt(25), Currency: "EUR"},
 	}
 	for _, tx := range txs {
 		if _, err := store.Insert(tx); err != nil {
@@ -1952,8 +1973,8 @@ func TestHandler_Portfolio_ShowsHeldPositionsOnly(t *testing.T) {
 	if strings.Contains(body, "IE00B3RBWM25") {
 		t.Errorf("fully-disposed IE00B3RBWM25 should not appear; got: %s", body)
 	}
-	if strings.Contains(body, "N26_SAVINGS") {
-		t.Errorf("interest instrument N26_SAVINGS should never appear on the portfolio page; got: %s", body)
+	if strings.Contains(body, "Rainy day") {
+		t.Errorf("the interest account should never appear on the portfolio page; got: %s", body)
 	}
 }
 
