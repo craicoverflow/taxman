@@ -12,27 +12,35 @@ import (
 	"github.com/craicoverflow/taxman/internal/db"
 )
 
-// interestCredit builds a manually-entered-style N26 interest credit,
-// matching the shape n26.NewInterestCredit produces (Quantity 1, the
-// credited amount in Price).
-func interestCredit(t *testing.T, date, amount string) Transaction {
+// namedInterestCredit builds a hand-entered interest credit for a
+// user-named account, matching the shape interest.NewCredit produces
+// (Quantity 1, the credited amount in Price, the account name in
+// Instrument).
+func namedInterestCredit(t *testing.T, source, date, amount string) Transaction {
 	t.Helper()
 	amt, err := decimal.NewFromString(amount)
 	if err != nil {
 		t.Fatalf("parsing amount %q: %v", amount, err)
 	}
 	return Transaction{
-		Platform:   PlatformN26,
+		Platform:   PlatformManual,
 		Type:       TypeInterest,
 		Date:       mustDate(t, date).UTC(),
-		Instrument: "N26_SAVINGS",
+		Instrument: source,
 		Quantity:   decimal.NewFromInt(1),
 		Price:      amt,
 		Currency:   "EUR",
 	}
 }
 
-func TestStore_ManualInterestCredits_ReturnsN26InterestMostRecentFirstWithIDs(t *testing.T) {
+// interestCredit is namedInterestCredit for the single-account tests,
+// where which account it is doesn't matter.
+func interestCredit(t *testing.T, date, amount string) Transaction {
+	t.Helper()
+	return namedInterestCredit(t, "Rainy day", date, amount)
+}
+
+func TestStore_ManualInterestCredits_ReturnsInterestMostRecentFirstWithIDs(t *testing.T) {
 	conn := openMigratedTestDB(t)
 	store := NewStore(conn)
 
@@ -60,7 +68,7 @@ func TestStore_ManualInterestCredits_ReturnsN26InterestMostRecentFirstWithIDs(t 
 		if ic.ID <= 0 {
 			t.Errorf("expected a positive row id, got %d", ic.ID)
 		}
-		if ic.Type != TypeInterest || ic.Platform != PlatformN26 {
+		if ic.Type != TypeInterest || ic.Platform != PlatformManual {
 			t.Errorf("unexpected row: %+v", ic.Transaction)
 		}
 	}
@@ -223,35 +231,15 @@ func TestStore_DeleteManualInterestCredit_RemovesRow(t *testing.T) {
 	}
 }
 
-// tradeRepublicInterestCredit is the Trade Republic analogue of
-// interestCredit — a different manual-interest platform/instrument,
-// so the store's editable/deletable query has to match it too.
-func tradeRepublicInterestCredit(t *testing.T, date, amount string) Transaction {
-	t.Helper()
-	amt, err := decimal.NewFromString(amount)
-	if err != nil {
-		t.Fatalf("parsing amount %q: %v", amount, err)
-	}
-	return Transaction{
-		Platform:   PlatformTradeRepublic,
-		Type:       TypeInterest,
-		Date:       mustDate(t, date).UTC(),
-		Instrument: "TRADE_REPUBLIC_SAVINGS",
-		Quantity:   decimal.NewFromInt(1),
-		Price:      amt,
-		Currency:   "EUR",
-	}
-}
-
-func TestStore_ManualInterestCredits_IncludesTradeRepublicAndSupportsEditDelete(t *testing.T) {
+func TestStore_ManualInterestCredits_KeepsAccountsSeparateAndEachEditable(t *testing.T) {
 	conn := openMigratedTestDB(t)
 	store := NewStore(conn)
 
-	if _, err := store.Insert(interestCredit(t, "2024-01-15", "5.00")); err != nil {
-		t.Fatalf("Insert N26 credit: %v", err)
+	if _, err := store.Insert(namedInterestCredit(t, "Rainy day", "2024-01-15", "5.00")); err != nil {
+		t.Fatalf("Insert first credit: %v", err)
 	}
-	if _, err := store.Insert(tradeRepublicInterestCredit(t, "2024-06-01", "9.99")); err != nil {
-		t.Fatalf("Insert Trade Republic credit: %v", err)
+	if _, err := store.Insert(namedInterestCredit(t, "An Post", "2024-06-01", "9.99")); err != nil {
+		t.Fatalf("Insert second credit: %v", err)
 	}
 
 	got, err := store.ManualInterestCredits()
@@ -259,28 +247,114 @@ func TestStore_ManualInterestCredits_IncludesTradeRepublicAndSupportsEditDelete(
 		t.Fatalf("ManualInterestCredits: %v", err)
 	}
 	if len(got) != 2 {
-		t.Fatalf("expected both manual-interest platforms listed, got %d", len(got))
+		t.Fatalf("expected both accounts listed, got %d", len(got))
 	}
 
-	// The most recent is the Trade Republic one; it must be editable
-	// and deletable through the same paths as an N26 credit.
-	tr := got[0]
-	if tr.Platform != PlatformTradeRepublic {
-		t.Fatalf("expected the Trade Republic credit first, got %s", tr.Platform)
+	// The most recent is the An Post one; it must be editable and
+	// deletable without disturbing the other account's credit.
+	post := got[0]
+	if post.Instrument != "An Post" {
+		t.Fatalf("expected the An Post credit first, got %q", post.Instrument)
 	}
-	if err := store.UpdateManualInterestCredit(tr.ID, tradeRepublicInterestCredit(t, "2024-06-02", "10.01")); err != nil {
-		t.Fatalf("UpdateManualInterestCredit (Trade Republic): %v", err)
+	if err := store.UpdateManualInterestCredit(post.ID, namedInterestCredit(t, "An Post", "2024-06-02", "10.01")); err != nil {
+		t.Fatalf("UpdateManualInterestCredit: %v", err)
 	}
-	if err := store.DeleteManualInterestCredit(tr.ID); err != nil {
-		t.Fatalf("DeleteManualInterestCredit (Trade Republic): %v", err)
+	if err := store.DeleteManualInterestCredit(post.ID); err != nil {
+		t.Fatalf("DeleteManualInterestCredit: %v", err)
 	}
 
 	after, err := store.ManualInterestCredits()
 	if err != nil {
 		t.Fatalf("ManualInterestCredits: %v", err)
 	}
-	if len(after) != 1 || after[0].Platform != PlatformN26 {
-		t.Errorf("expected only the N26 credit to remain, got %+v", after)
+	if len(after) != 1 || after[0].Instrument != "Rainy day" {
+		t.Errorf("expected only the Rainy day credit to remain, got %+v", after)
+	}
+}
+
+func TestStore_ManualInterestCredits_SameDayAndAmountOnTwoAccountsAreBothKept(t *testing.T) {
+	// Two banks paying the same amount on the same day is an ordinary
+	// coincidence, not a duplicate — the account name is what keeps
+	// the fingerprints apart.
+	conn := openMigratedTestDB(t)
+	store := NewStore(conn)
+
+	for _, account := range []string{"Rainy day", "An Post"} {
+		inserted, err := store.Insert(namedInterestCredit(t, account, "2024-06-01", "12.34"))
+		if err != nil {
+			t.Fatalf("Insert %q: %v", account, err)
+		}
+		if !inserted {
+			t.Fatalf("Insert %q: deduped against another account's credit", account)
+		}
+	}
+
+	got, err := store.ManualInterestCredits()
+	if err != nil {
+		t.Fatalf("ManualInterestCredits: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 credits, got %d: %+v", len(got), got)
+	}
+}
+
+func TestStore_UpdateManualInterestCredit_CorrectsAMistypedAccountName(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	store := NewStore(conn)
+	if _, err := store.Insert(namedInterestCredit(t, "Ranny day", "2024-03-01", "10.00")); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	before, err := store.ManualInterestCredits()
+	if err != nil || len(before) != 1 {
+		t.Fatalf("setup: got %d credits, err %v", len(before), err)
+	}
+
+	corrected := namedInterestCredit(t, "Rainy day", "2024-03-01", "10.00")
+	if err := store.UpdateManualInterestCredit(before[0].ID, corrected); err != nil {
+		t.Fatalf("UpdateManualInterestCredit: %v", err)
+	}
+
+	after, err := store.ManualInterestCredits()
+	if err != nil {
+		t.Fatalf("ManualInterestCredits: %v", err)
+	}
+	if len(after) != 1 || after[0].Instrument != "Rainy day" {
+		t.Fatalf("account name not corrected: %+v", after)
+	}
+	if after[0].Fingerprint() != corrected.Fingerprint() {
+		t.Errorf("fingerprint not recomputed over the new name: got %q want %q", after[0].Fingerprint(), corrected.Fingerprint())
+	}
+}
+
+func TestStore_ManualInterestSources_ListsDistinctAccountNamesAlphabetically(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	store := NewStore(conn)
+
+	for _, c := range []struct{ account, date, amount string }{
+		{"Rainy day", "2024-01-15", "5.00"},
+		{"An Post", "2024-06-01", "9.99"},
+		{"Rainy day", "2024-07-01", "6.00"}, // same account again — listed once
+	} {
+		if _, err := store.Insert(namedInterestCredit(t, c.account, c.date, c.amount)); err != nil {
+			t.Fatalf("Insert %q: %v", c.account, err)
+		}
+	}
+	if _, err := store.Insert(baseTransaction(t)); err != nil { // a buy — not an account
+		t.Fatalf("Insert buy: %v", err)
+	}
+
+	got, err := store.ManualInterestSources()
+	if err != nil {
+		t.Fatalf("ManualInterestSources: %v", err)
+	}
+	want := []string{"An Post", "Rainy day"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
 	}
 }
 

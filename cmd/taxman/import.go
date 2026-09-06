@@ -14,7 +14,7 @@ import (
 // runImport implements `taxman import <file> [--platform p] [--db path] [--dry-run]`.
 func runImport(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: taxman import <file> [--platform degiro|ibkr|etrade|n26] [--db path] [--dry-run]")
+		return fmt.Errorf("usage: taxman import <file> [--platform degiro|ibkr|etrade] [--db path] [--dry-run]")
 	}
 
 	file := args[0]

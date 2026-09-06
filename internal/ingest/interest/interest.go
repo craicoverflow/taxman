@@ -1,90 +1,81 @@
-// Package interest is the registry of hand-entered interest-credit
-// sources — savings accounts with no clean CSV export, where the only
-// way a credit reaches the ledger is the dashboard's "Log interest
-// payment" form (SPEC.md §7).
+// Package interest builds hand-entered interest credits — the savings
+// interest a user types into the dashboard's "Log interest payments"
+// form because their bank has no clean CSV export (SPEC.md §7).
 //
-// Each Source names one such account and knows how to build a
-// ledger.Transaction for a credit from it. The web layer renders
-// Sources as the form's source picker and dispatches a submission back
-// through New; every source is EUR-only, matching
-// engine.ComputeDIRT's requirement.
+// There is no list of supported institutions, by design. DIRT is DIRT:
+// engine.ComputeDIRT sums every interest-type transaction and applies
+// the rate for the credit date, and no Irish rule turns on which bank
+// paid it. So the account is named by the user in free text ("Rainy
+// day", "Revolut", whatever they call it), and that name is all taxman
+// keeps: it rides on the transaction's Instrument so two accounts stay
+// separable rows on the dashboard, and it is what makes two credits on
+// the same date for the same amount distinct rather than duplicates.
 package interest
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
-	"github.com/craicoverflow/taxman/internal/ingest/n26"
-	"github.com/craicoverflow/taxman/internal/ingest/traderepublic"
+	"github.com/shopspring/decimal"
+
 	"github.com/craicoverflow/taxman/internal/ledger"
 )
 
-// Source is one hand-entered interest account.
-type Source struct {
-	// Key is the stable token used on the wire (the form's `source`
-	// field, a hidden field on the edit row) and must never change for
-	// an existing source — stored credits are matched back to it.
-	Key string
-	// Label is the human name shown in the source picker.
-	Label string
-	// Platform is the ledger.Platform every credit from this source
-	// carries; it also scopes ledger's editable/deletable query.
-	Platform ledger.Platform
+const dateLayout = "2006-01-02"
 
-	build func(date, amount, currency string) (ledger.Transaction, error)
-}
+// MaxSourceLen bounds a source name. It exists to keep a pasted
+// accident out of the ledger, not to constrain naming — no real
+// account name comes close.
+const MaxSourceLen = 100
 
-// sources is the registry, in the order the picker should list them.
-// N26 stays first: it was the only source before Trade Republic was
-// added, so it remains the default when a submission omits `source`.
-var sources = []Source{
-	{Key: "n26", Label: "N26", Platform: ledger.PlatformN26, build: n26.NewInterestCredit},
-	{Key: "traderepublic", Label: "Trade Republic", Platform: ledger.PlatformTradeRepublic, build: traderepublic.NewInterestCredit},
-}
-
-// Default is the source assumed when a request carries no `source`
-// value — preserves the pre-Trade-Republic behaviour where every
-// logged credit was an N26 one.
-var Default = sources[0]
-
-// Sources returns the registered interest sources, in picker order.
-func Sources() []Source {
-	out := make([]Source, len(sources))
-	copy(out, sources)
-	return out
-}
-
-// SourceByKey looks a source up by its wire key. An empty key resolves
-// to Default; an unknown non-empty key is an error, never a silent
-// fallback.
-func SourceByKey(key string) (Source, error) {
-	if key == "" {
-		return Default, nil
-	}
-	for _, s := range sources {
-		if s.Key == key {
-			return s, nil
-		}
-	}
-	return Source{}, fmt.Errorf("interest: unknown source %q", key)
-}
-
-// SourceForPlatform returns the source whose credits carry p, so a
-// stored credit can be labelled and its edit form can echo the right
-// source key back. ok is false for a platform with no manual-interest
-// source.
-func SourceForPlatform(p ledger.Platform) (Source, bool) {
-	for _, s := range sources {
-		if s.Platform == p {
-			return s, true
-		}
-	}
-	return Source{}, false
+// NormalizeSource trims a user-typed source name and collapses runs of
+// internal whitespace, so "  Rainy  day " and "Rainy day" name the same
+// account rather than two that merely look alike. Case is left alone:
+// it's the user's name for their own account.
+func NormalizeSource(source string) string {
+	return strings.Join(strings.Fields(source), " ")
 }
 
 // NewCredit builds a ledger.Transaction for one hand-entered interest
-// credit from src. date must be YYYY-MM-DD and amount a positive
-// decimal string; currency is fixed to EUR (every supported savings
-// account pays interest in euro, and engine.ComputeDIRT requires it).
-func (src Source) NewCredit(date, amount string) (ledger.Transaction, error) {
-	return src.build(date, amount, "EUR")
+// credit. source is the user's own name for the account it was paid on
+// (required — an unnamed credit couldn't be told apart from another
+// account's); date must be YYYY-MM-DD; amount must be a positive
+// decimal string. Currency is fixed to EUR, which is what
+// engine.ComputeDIRT requires.
+//
+// Quantity is fixed at 1 and the full credited amount is carried in
+// Price, matching how engine.ComputeDIRT reads an interest
+// transaction's amount as Quantity*Price.
+func NewCredit(source, date, amount string) (ledger.Transaction, error) {
+	name := NormalizeSource(source)
+	if name == "" {
+		return ledger.Transaction{}, fmt.Errorf("interest: source must not be empty")
+	}
+	if len(name) > MaxSourceLen {
+		return ledger.Transaction{}, fmt.Errorf("interest: source %q is longer than %d characters", name, MaxSourceLen)
+	}
+
+	parsedDate, err := time.Parse(dateLayout, date)
+	if err != nil {
+		return ledger.Transaction{}, fmt.Errorf("interest: parsing date %q: %w", date, err)
+	}
+
+	parsedAmount, err := decimal.NewFromString(amount)
+	if err != nil {
+		return ledger.Transaction{}, fmt.Errorf("interest: parsing amount %q: %w", amount, err)
+	}
+	if !parsedAmount.IsPositive() {
+		return ledger.Transaction{}, fmt.Errorf("interest: amount %q must be positive", amount)
+	}
+
+	return ledger.Transaction{
+		Platform:   ledger.PlatformManual,
+		Type:       ledger.TypeInterest,
+		Date:       parsedDate.UTC(),
+		Instrument: name,
+		Quantity:   decimal.NewFromInt(1),
+		Price:      parsedAmount,
+		Currency:   "EUR",
+	}, nil
 }

@@ -1,6 +1,6 @@
 # dirt_simple
 
-Golden fixture for SPEC.md §5's "DIRT on N26 interest, straightforward"
+Golden fixture for SPEC.md §5's "DIRT on deposit interest, straightforward"
 scenario.
 
 Synthetic scenario: a single €200 interest credit on 2024-06-01.

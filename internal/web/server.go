@@ -334,8 +334,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// lot-matched positions. Interest credits aren't a holding — they
 	// have their own "Interest credits logged" card and feed the DIRT
 	// line in the summary — so they're kept out of this view entirely
-	// (otherwise every N26 credit collapses into one perpetually
-	// UNCLASSIFIED "N26_SAVINGS" row that can never be classified
+	// (otherwise every savings account collapses into a perpetually
+	// UNCLASSIFIED holding row that can never be classified
 	// meaningfully).
 	var holdingTxs []ledger.Transaction
 	for _, tx := range txs {
@@ -507,21 +507,20 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	interestCredits := make([]interestCreditRow, 0, len(stored))
 	for _, ic := range stored {
-		row := interestCreditRow{
+		interestCredits = append(interestCredits, interestCreditRow{
 			ID:     ic.ID,
+			Source: ic.Instrument,
 			Date:   ic.Date.Format("2006-01-02"),
 			Amount: ic.Price.String(),
-		}
-		if src, ok := interest.SourceForPlatform(ic.Platform); ok {
-			row.Source = src.Label
-			row.SourceKey = src.Key
-		} else {
-			// A manual-interest platform ledger recognises but the
-			// registry doesn't — shouldn't happen, but show the raw
-			// platform rather than a blank cell.
-			row.Source = string(ic.Platform)
-		}
-		interestCredits = append(interestCredits, row)
+		})
+	}
+
+	// Names already used, offered as suggestions on the entry form so a
+	// second credit for the same account needn't be retyped exactly.
+	interestSources, err := s.ledgerStore.ManualInterestSources()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("loading interest sources: %v", err), http.StatusInternalServerError)
+		return
 	}
 
 	chartJS, err := chartDataJS(summary, disposals)
@@ -545,7 +544,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Platforms:         ingest.Platforms,
 		Summary:           summary,
 		InterestCredits:   interestCredits,
-		InterestSources:   interest.Sources(),
+		InterestSources:   interestSources,
 		InterestBatchRows: make([]struct{}, interestBatchRows),
 		ChartDataJS:       chartJS,
 		Years:             years,
@@ -783,17 +782,17 @@ func (s *Server) handleClassify(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleInterest logs one or more hand-entered interest credits for a
-// single source: POST /interest with one "source" (a key from
-// internal/ingest/interest — N26 or Trade Republic; omitted means N26,
-// the original default) and parallel "date" (YYYY-MM-DD) / "amount"
-// (positive decimal) fields, one pair per row of the dashboard's batch
-// grid. Rows left entirely blank are skipped; a row with only one of
-// the pair filled is a 400 naming the row, and nothing is written —
-// the batch is all-or-nothing on validation. Those savings accounts
-// have no clean CSV export, so this is the only way interest enters
-// the ledger; currency is fixed to EUR, the only one they pay in. On
-// success it redirects back to the dashboard. A single filled row is
-// just a batch of one, so this stays the single-entry path too.
+// single account: POST /interest with one "source" (the user's own
+// name for the account — free text, required) and parallel "date"
+// (YYYY-MM-DD) / "amount" (positive decimal) fields, one pair per row
+// of the dashboard's batch grid. Rows left entirely blank are skipped;
+// a row with only one of the pair filled is a 400 naming the row, and
+// nothing is written — the batch is all-or-nothing on validation.
+// Savings accounts have no clean CSV export, so this is the only way
+// interest enters the ledger; currency is fixed to EUR, which is what
+// DIRT is computed in. On success it redirects back to the dashboard.
+// A single filled row is just a batch of one, so this stays the
+// single-entry path too.
 func (s *Server) handleInterest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -806,11 +805,7 @@ func (s *Server) handleInterest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	source, err := interest.SourceByKey(r.FormValue("source"))
-	if err != nil {
-		http.Error(w, fmt.Sprintf("interest: %v", err), http.StatusBadRequest)
-		return
-	}
+	source := r.FormValue("source")
 
 	dates, amounts := r.Form["date"], r.Form["amount"]
 	if len(dates) != len(amounts) {
@@ -823,7 +818,7 @@ func (s *Server) handleInterest(w http.ResponseWriter, r *http.Request) {
 		if date == "" && amount == "" {
 			continue // untouched grid row
 		}
-		tx, err := source.NewCredit(date, amount)
+		tx, err := interest.NewCredit(source, date, amount)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("interest: row %d: %v", i+1, err), http.StatusBadRequest)
 			return
@@ -846,13 +841,13 @@ func (s *Server) handleInterest(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleInterestUpdate corrects a hand-entered interest credit: POST
-// /interest/update with an `id` (the row shown on the dashboard), the
-// same `date` and `amount` fields handleInterest takes, and the row's
-// `source` key (a hidden field the dashboard echoes back — the credit
-// keeps its source; the fingerprint recomputed over the new values
-// depends on it). An id that isn't a manual interest credit is a 404;
-// a correction that would duplicate another credit is a 409; an
-// unknown source or validation failure is a 400.
+// /interest/update with an `id` (the row shown on the dashboard) and
+// the same `source`, `date` and `amount` fields handleInterest takes.
+// All three are editable — a mistyped account name is as correctable
+// as a mistyped amount — and the fingerprint is recomputed over the
+// corrected values. An id that isn't a manual interest credit is a
+// 404; a correction that would duplicate another credit is a 409; a
+// validation failure is a 400.
 func (s *Server) handleInterestUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -871,12 +866,7 @@ func (s *Server) handleInterestUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	source, err := interest.SourceByKey(r.FormValue("source"))
-	if err != nil {
-		http.Error(w, fmt.Sprintf("interest: %v", err), http.StatusBadRequest)
-		return
-	}
-	tx, err := source.NewCredit(r.FormValue("date"), r.FormValue("amount"))
+	tx, err := interest.NewCredit(r.FormValue("source"), r.FormValue("date"), r.FormValue("amount"))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("interest: %v", err), http.StatusBadRequest)
 		return
@@ -900,7 +890,7 @@ func (s *Server) handleInterestUpdate(w http.ResponseWriter, r *http.Request) {
 // handleInterestDelete removes a hand-entered interest credit: POST
 // /interest/delete with an `id`. An id that isn't a manual interest
 // credit is a 404. No `source` is needed — the delete keys on id
-// alone, scoped to the manual-interest platforms.
+// alone, scoped to hand-entered credits.
 func (s *Server) handleInterestDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -1430,15 +1420,14 @@ func distinctYears(txs []ledger.Transaction) []int {
 // interestCreditRow is one hand-entered interest credit shown on the
 // dashboard, with its row id so the edit and delete forms can target
 // it. Date is YYYY-MM-DD; Amount is the credited euro amount as a
-// plain decimal string (what the edit form pre-fills). Source is the
-// human label of the account it came from; SourceKey is the wire key
-// the edit form echoes back so the fingerprint recomputes correctly.
+// plain decimal string; Source is the user's own name for the account
+// it was paid on. All three pre-fill the edit form, and all three are
+// correctable there.
 type interestCreditRow struct {
-	ID        int64
-	Date      string
-	Amount    string
-	Source    string
-	SourceKey string
+	ID     int64
+	Date   string
+	Amount string
+	Source string
 }
 
 type dashboardData struct {
@@ -1446,8 +1435,8 @@ type dashboardData struct {
 	Platforms         []string
 	Summary           dashboardSummary
 	InterestCredits   []interestCreditRow
-	InterestSources   []interest.Source // the "Log interest payments" source picker
-	InterestBatchRows []struct{}        // blank grid rows to render; only the count matters
+	InterestSources   []string   // account names already used, suggested on the entry form
+	InterestBatchRows []struct{} // blank grid rows to render; only the count matters
 	ChartDataJS       template.JS
 
 	// Years is the tax-year selector's options (descending);
@@ -1523,11 +1512,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 <h2>Log interest payments</h2>
 <form action="/interest" method="post">
 <div class="form-row">
-<label>Source:
-<select name="source">
-{{range .InterestSources}}<option value="{{.Key}}">{{.Label}}</option>{{end}}
-</select>
-</label>
+<label>Account: <input type="text" name="source" list="interest-sources" placeholder="Rainy day savings" required></label>
+<datalist id="interest-sources">
+{{range .InterestSources}}<option value="{{.}}"></option>{{end}}
+</datalist>
 </div>
 <table class="data" id="interest-batch">
 <thead><tr><th>Date</th><th>Amount (EUR)</th></tr></thead>
@@ -1569,17 +1557,16 @@ function addInterestRow() {
 <div class="disclosure-body">
 {{if .InterestCredits}}
 <table class="data">
-<thead><tr><th>Source</th><th>Date</th><th>Amount (EUR)</th><th></th><th></th></tr></thead>
+<thead><tr><th>Account</th><th>Date</th><th>Amount (EUR)</th><th></th><th></th></tr></thead>
 <tbody>
 {{range .InterestCredits}}
 <tr>
-<td>{{.Source}}</td>
+<td><input form="ic-{{.ID}}" type="text" name="source" list="interest-sources" value="{{.Source}}" required></td>
 <td><input form="ic-{{.ID}}" type="date" name="date" value="{{.Date}}" required></td>
 <td><input form="ic-{{.ID}}" class="money" type="text" name="amount" value="{{.Amount}}" required></td>
 <td>
 <form id="ic-{{.ID}}" action="/interest/update" method="post">
 <input type="hidden" name="id" value="{{.ID}}">
-<input type="hidden" name="source" value="{{.SourceKey}}">
 <button type="submit">Save</button>
 </form>
 </td>

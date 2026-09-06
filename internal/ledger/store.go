@@ -17,25 +17,6 @@ import (
 // dashboard can be corrected or removed.
 var ErrNotManualInterest = errors.New("ledger: row is not a hand-entered interest credit")
 
-// manualInterestPlatforms are the platforms whose interest credits are
-// typed in on the dashboard rather than parsed from a CSV export —
-// those savings accounts (N26, Trade Republic) have no clean export.
-// They are the only transactions taxman lets the user edit or delete.
-var manualInterestPlatforms = []Platform{PlatformN26, PlatformTradeRepublic}
-
-// manualInterestPlatformArgs returns the placeholder fragment and the
-// matching args for a `platform IN (...)` clause over
-// manualInterestPlatforms.
-func manualInterestPlatformArgs() (placeholders string, args []any) {
-	parts := make([]string, len(manualInterestPlatforms))
-	args = make([]any, len(manualInterestPlatforms))
-	for i, p := range manualInterestPlatforms {
-		parts[i] = "?"
-		args[i] = string(p)
-	}
-	return strings.Join(parts, ", "), args
-}
-
 // ErrDuplicateInterestCredit is returned by UpdateManualInterestCredit
 // when the corrected date/amount would collide with another interest
 // credit already stored (same fingerprint). Nothing is changed.
@@ -86,28 +67,27 @@ func (s *Store) Insert(tx Transaction) (inserted bool, err error) {
 
 // StoredInterestCredit is one hand-entered interest credit paired with
 // its database row id, so the web layer can offer per-row correction
-// (edit the date/amount) or deletion of a mistaken entry. Platform
-// identifies which source it came from (see internal/ingest/interest).
+// (edit the date/amount) or deletion of a mistaken entry. Instrument
+// carries the user's own name for the account it was paid on (see
+// internal/ingest/interest).
 type StoredInterestCredit struct {
 	ID int64
 	Transaction
 }
 
 // ManualInterestCredits returns every hand-entered interest credit
-// (one of manualInterestPlatforms, type interest), most recent first,
-// each with its row id. The order is deterministic: by date
-// descending, then by row id descending to break ties between credits
-// on the same day. These are the only transactions taxman lets the
-// user edit or delete — see ErrNotManualInterest.
+// (PlatformManual, type interest), most recent first, each with its
+// row id. The order is deterministic: by date descending, then by row
+// id descending to break ties between credits on the same day. These
+// are the only transactions taxman lets the user edit or delete — see
+// ErrNotManualInterest.
 func (s *Store) ManualInterestCredits() ([]StoredInterestCredit, error) {
-	placeholders, args := manualInterestPlatformArgs()
-	args = append(args, string(TypeInterest))
 	rows, err := s.db.Query(
 		`SELECT id, platform, type, date, instrument, quantity, price, currency, source_ref, description
 		 FROM transactions
-		 WHERE platform IN (`+placeholders+`) AND type = ?
+		 WHERE platform = ? AND type = ?
 		 ORDER BY date DESC, id DESC`,
-		args...,
+		string(PlatformManual), string(TypeInterest),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying interest credits: %w", err)
@@ -161,29 +141,25 @@ func (s *Store) ManualInterestCredits() ([]StoredInterestCredit, error) {
 // with tx, recomputing its fingerprint. The WHERE clause pins the row
 // to a hand-entered interest credit, so an imported transaction can
 // never be mutated through this path: a missing row or a non-matching
-// type changes nothing and returns ErrNotManualInterest. The row's
-// platform and instrument are left untouched; tx must therefore be
-// built for the same source (its Fingerprint depends on both), which
-// is what the dashboard's edit form does via a hidden source field. If
-// the new fingerprint collides with another stored credit,
+// platform/type changes nothing and returns ErrNotManualInterest. The
+// source name (Instrument) is updated along with the date and amount,
+// so a mistyped account name is correctable in place. If the new
+// fingerprint collides with another stored credit,
 // ErrDuplicateInterestCredit is returned and nothing changes.
 func (s *Store) UpdateManualInterestCredit(id int64, tx Transaction) error {
-	placeholders, platformArgs := manualInterestPlatformArgs()
-	args := []any{
+	result, err := s.db.Exec(
+		`UPDATE transactions
+		 SET fingerprint = ?, date = ?, instrument = ?, quantity = ?, price = ?, currency = ?
+		 WHERE id = ? AND platform = ? AND type = ?`,
 		tx.Fingerprint(),
 		tx.Date.UTC().Format(time.RFC3339),
+		tx.Instrument,
 		tx.Quantity.String(),
 		tx.Price.String(),
 		tx.Currency,
 		id,
-	}
-	args = append(args, platformArgs...)
-	args = append(args, string(TypeInterest))
-	result, err := s.db.Exec(
-		`UPDATE transactions
-		 SET fingerprint = ?, date = ?, quantity = ?, price = ?, currency = ?
-		 WHERE id = ? AND platform IN (`+placeholders+`) AND type = ?`,
-		args...,
+		string(PlatformManual),
+		string(TypeInterest),
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -207,14 +183,10 @@ func (s *Store) UpdateManualInterestCredit(id int64, tx Transaction) error {
 // touch anything that isn't a hand-entered interest credit, returning
 // ErrNotManualInterest when nothing matched.
 func (s *Store) DeleteManualInterestCredit(id int64) error {
-	placeholders, platformArgs := manualInterestPlatformArgs()
-	args := []any{id}
-	args = append(args, platformArgs...)
-	args = append(args, string(TypeInterest))
 	result, err := s.db.Exec(
 		`DELETE FROM transactions
-		 WHERE id = ? AND platform IN (`+placeholders+`) AND type = ?`,
-		args...,
+		 WHERE id = ? AND platform = ? AND type = ?`,
+		id, string(PlatformManual), string(TypeInterest),
 	)
 	if err != nil {
 		return fmt.Errorf("deleting interest credit: %w", err)
@@ -228,6 +200,35 @@ func (s *Store) DeleteManualInterestCredit(id int64) error {
 		return ErrNotManualInterest
 	}
 	return nil
+}
+
+// ManualInterestSources returns the distinct account names already
+// used on hand-entered interest credits, alphabetically. The dashboard
+// offers them as suggestions on the "Log interest payments" form, so a
+// name typed once needn't be retyped exactly — but the field stays
+// free text: taxman has no fixed list of institutions.
+func (s *Store) ManualInterestSources() ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT DISTINCT instrument
+		 FROM transactions
+		 WHERE platform = ? AND type = ?
+		 ORDER BY instrument`,
+		string(PlatformManual), string(TypeInterest),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying interest sources: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scanning interest source: %w", err)
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }
 
 // All returns every stored Transaction. SourceRef is not

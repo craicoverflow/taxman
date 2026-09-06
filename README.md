@@ -1,8 +1,8 @@
 # taxman - Tax Manager for Investments in Ireland
 
 Self-hosted, single-binary tool that ingests broker CSV exports (Degiro,
-IBKR, ETRADE, N26) and computes running Irish CGT, exit-tax and DIRT
-liability with a full audit trail. See [`SPEC.md`](SPEC.md).
+IBKR, ETRADE) plus hand-entered savings interest, and computes running
+Irish CGT, exit-tax and DIRT liability with a full audit trail. See [`SPEC.md`](SPEC.md).
 
 **How the tax is calculated** — every formula in plain English with its
 Irish tax-law citation (TCA 1997, Finance Act 2025, Revenue Tax and Duty

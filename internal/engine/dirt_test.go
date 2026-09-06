@@ -10,7 +10,7 @@ import (
 
 func interestTx(t *testing.T, date string, amount int64) ledger.Transaction {
 	t.Helper()
-	tx := buyTx(t, "N26_SAVINGS", date, 1, amount) // Quantity=1, Price=amount -> amount
+	tx := buyTx(t, "Savings account", date, 1, amount) // Quantity=1, Price=amount -> amount
 	tx.Type = ledger.TypeInterest
 	return tx
 }

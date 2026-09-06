@@ -59,9 +59,9 @@ post_interest() {
 		--data-urlencode "date=$2" \
 		--data-urlencode "amount=$3"
 }
-post_interest n26 2024-06-30 142.85
-post_interest n26 2024-12-31 168.40
-post_interest traderepublic 2024-09-30 96.20
+post_interest "Demo savings" 2024-06-30 142.85
+post_interest "Demo savings" 2024-12-31 168.40
+post_interest "Demo credit union" 2024-09-30 96.20
 
 kill "$server" 2>/dev/null || true
 wait "$server" 2>/dev/null || true

@@ -34,7 +34,7 @@ build (`make ci`).
 |---|---|---|
 | **Capital Gains Tax (CGT)** | Gains on disposals of `CGT_ASSET` holdings — individual shares, most US-domiciled ETFs, vested RSU shares | §6, §7 |
 | **Fund exit tax** | Gains on disposals of `EXIT_TAX_FUND` holdings — Irish/EU-domiciled UCITS ETFs and equivalent offshore funds | §8 |
-| **Deposit Interest Retention Tax (DIRT)** | Tax on hand-entered deposit interest (N26, Trade Republic) | §9 |
+| **Deposit Interest Retention Tax (DIRT)** | Tax on hand-entered deposit interest (any savings account) | §9 |
 
 A holding is `CGT_ASSET` or `EXIT_TAX_FUND` **only** because a human set
 it. Until then it is `UNCLASSIFIED` and every calculation for it is
@@ -320,8 +320,9 @@ but does **not** compute the tax charge for it — §11.2.
 ## 9. DIRT
 
 No lots, no matching. `taxman` totals the hand-entered interest credits
-(N26, Trade Republic — neither bank has a clean export) and applies the
-DIRT rate:
+— savings accounts have no clean export, so each credit is typed in
+against an account the user names — and applies the DIRT rate. Which
+institution paid the interest changes no figure below:
 
 ```
 total interest = Σ of the interest-credit amounts   (euro only)

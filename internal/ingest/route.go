@@ -25,9 +25,11 @@ import (
 )
 
 // Platforms lists the platforms with an automatic parser, in
-// detection-attempt order. n26 is deliberately excluded: it's
-// manual-entry only (task 6.3), so it never appears in a header
-// auto-detection or an upload/import platform picker.
+// detection-attempt order. Hand-entered interest credits have no
+// entry here by design: no bank is modelled, and a credit reaches the
+// ledger only through the dashboard (internal/ingest/interest), so it
+// never appears in a header auto-detection or an upload/import
+// platform picker.
 var Platforms = []string{"degiro", "ibkr", "etrade"}
 
 var detectors = map[string]func(header []string) bool{
