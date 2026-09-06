@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: make build
+
+      - name: Test
+        run: make test
+
+      - name: Feature figures up to date
+        # Regenerating the pinned figures in features/*.feature must be a
+        # no-op on a clean tree. If it isn't, an engine/taxrules change
+        # moved a number without refreshing the worked examples — run
+        # `make regen-features` and commit the result. See SPEC.md §14.
+        run: make check-features
+
+      - name: Accountant docs up to date
+        # docs/maths.html is generated from docs/maths.md and features/
+        # and is committed for sharing. gendocs output is deterministic
+        # (the footer carries a source fingerprint, not a date), so
+        # regenerating on a clean tree must be a no-op — run `make docs`
+        # and commit the result.
+        run: make check-docs
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.1

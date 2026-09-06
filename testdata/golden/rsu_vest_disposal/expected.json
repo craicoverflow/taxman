@@ -1,0 +1,14 @@
+{
+  "disposals": [
+    {
+      "date": "2024-08-01",
+      "quantity": "20",
+      "proceeds": "1200",
+      "cost_basis": "800",
+      "gain": "400"
+    }
+  ],
+  "total_gain": "400",
+  "taxable_gain": "0",
+  "tax_due": "0"
+}

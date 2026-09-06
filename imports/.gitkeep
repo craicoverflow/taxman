@@ -1,0 +1,3 @@
+Drop broker CSV exports here on the host. They are gitignored.
+Import them into the container's database with, e.g.:
+  docker compose exec taxman taxman import /imports/degiro.csv

@@ -1,0 +1,7 @@
+Statement,Header,Field Name,Field Value
+Statement,Data,BrokerName,Interactive Brokers
+Trades,Header,DataDiscriminator,Asset Category,Currency,Symbol,Date/Time,Quantity,T. Price,ISIN
+Trades,Data,Order,Stocks,EUR,IWDA,2024-07-01,10,95.00,IE00B4L5Y983
+Trades,Data,Order,Stocks,EUR,VWCE,2024-08-15,4,105.25,IE00BK5BQT80
+Dividends,Header,Currency,Date,Description,Amount
+Dividends,Data,EUR,2024-04-01,IWDA Dividend,12.50

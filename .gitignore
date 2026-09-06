@@ -1,0 +1,21 @@
+# Build output
+/bin/
+/tmp/
+
+# Real financial data — never committed. See SPEC.md §6.
+/data/
+/imports/*
+!/imports/.gitkeep
+*.local.*
+*.db
+*.db.bak
+*.db-journal
+*.db-wal
+*.db-shm
+*_dump.csv
+.env
+.env.prod
+
+# Go
+*.test
+*.out

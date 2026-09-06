@@ -1,0 +1,5 @@
+platform,type,date,instrument,quantity,price,currency
+degiro,buy,2024-01-01,AAPL,10,100,EUR
+degiro,sell,2024-06-01,AAPL,10,300,EUR
+degiro,buy,2024-01-01,MSFT,10,100,EUR
+degiro,sell,2024-07-01,MSFT,10,400,EUR

@@ -1,0 +1,3 @@
+platform,type,date,instrument,quantity,price,currency
+ibkr,buy,2020-01-01,IE_ETF,100,10,EUR
+ibkr,sell,2025-12-31,IE_ETF,100,20,EUR

@@ -1,0 +1,19 @@
+{
+  "year": 2025,
+  "holdings": [
+    {
+      "instrument": "NEW",
+      "disposals": [
+        {"date": "2025-06-01", "quantity": "10", "proceeds": "11000", "cost_basis": "1000", "gain": "10000"}
+      ],
+      "realised_gain": "10000"
+    }
+  ],
+  "net_chargeable_gain": "10000",
+  "loss_brought_forward": "4000",
+  "loss_brought_forward_used": "4000",
+  "loss_carried_forward": "0",
+  "annual_exemption_used": "1270",
+  "taxable_gain": "4730",
+  "tax_due": "1560"
+}

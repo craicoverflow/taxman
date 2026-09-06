@@ -1,0 +1,5 @@
+platform,type,date,instrument,quantity,price,currency
+degiro,buy,2023-01-01,OLD,10,500,EUR
+degiro,sell,2024-03-01,OLD,10,100,EUR
+degiro,buy,2024-01-01,NEW,10,100,EUR
+degiro,sell,2025-06-01,NEW,10,1100,EUR

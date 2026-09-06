@@ -1,0 +1,22 @@
+# Keep the build context small and free of any local data.
+.git
+bin/
+tmp/
+data/
+imports/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.db.bak
+*_dump.csv
+.env
+.env.*
+!.env.example
+!.env.prod.example
+docs/screenshots/
+*.md
+!README.md
+.github/
+.golangci.yml
+.air.toml

@@ -1,0 +1,484 @@
+/*
+ * taxman UI — a dense, numbers-first data-tool skin.
+ *
+ * Hand-written, embedded in the binary, served at /static/app.css.
+ * No build step: plain CSS custom properties, system fonts, and a
+ * prefers-color-scheme dark theme. Every rule hangs off an element or a
+ * container class — never off markup the web tests assert on.
+ */
+
+:root {
+	color-scheme: light dark;
+
+	--bg: #f6f7f9;
+	--surface: #ffffff;
+	--surface-2: #f0f2f5;
+	--border: #e3e6eb;
+	--border-strong: #cfd4dc;
+	--text: #1b1e24;
+	--text-muted: #626875;
+	--accent: #3a66db;
+	--accent-weak: #e9f0fd;
+	--pos: #167c45;
+	--neg: #c23b32;
+	--warn: #a86a1f;
+
+	--radius: 9px;
+	--radius-sm: 6px;
+	--gap: 20px;
+
+	--font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+		Helvetica, Arial, "Helvetica Neue", sans-serif;
+	--font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+		"Liberation Mono", monospace;
+
+	--shadow: 0 1px 2px rgba(20, 25, 35, 0.05),
+		0 1px 3px rgba(20, 25, 35, 0.04);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #0e1116;
+		--surface: #171b22;
+		--surface-2: #1f242e;
+		--border: #2b313c;
+		--border-strong: #3a4150;
+		--text: #e7e9ee;
+		--text-muted: #9aa2af;
+		--accent: #6d97f2;
+		--accent-weak: #1a2540;
+		--pos: #4cae7d;
+		--neg: #e07068;
+		--warn: #d3a24e;
+		--shadow: none;
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html {
+	font-size: 15px;
+}
+
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--text);
+	font-family: var(--font-sans);
+	line-height: 1.5;
+	-webkit-font-smoothing: antialiased;
+	text-rendering: optimizeLegibility;
+}
+
+/* ---- top bar -------------------------------------------------------- */
+
+.topnav {
+	position: sticky;
+	top: 0;
+	z-index: 10;
+	background: color-mix(in srgb, var(--surface) 88%, transparent);
+	backdrop-filter: saturate(1.4) blur(8px);
+	border-bottom: 1px solid var(--border);
+}
+
+.topnav-inner {
+	max-width: 1120px;
+	margin: 0 auto;
+	padding: 0 24px;
+	height: 52px;
+	display: flex;
+	align-items: center;
+	gap: 28px;
+}
+
+.brand {
+	font-weight: 650;
+	letter-spacing: -0.01em;
+	font-size: 0.98rem;
+}
+
+.brand::before {
+	content: "€";
+	display: inline-block;
+	margin-right: 7px;
+	color: var(--accent);
+	font-weight: 700;
+}
+
+.nav {
+	display: flex;
+	gap: 4px;
+}
+
+.navlink {
+	padding: 6px 10px;
+	border-radius: var(--radius-sm);
+	color: var(--text-muted);
+	text-decoration: none;
+	font-size: 0.88rem;
+	font-weight: 500;
+	transition: background 0.12s ease, color 0.12s ease;
+}
+
+.navlink:hover {
+	background: var(--surface-2);
+	color: var(--text);
+}
+
+.navlink-active {
+	background: var(--accent-weak);
+	color: var(--accent);
+}
+
+.navbtn {
+	margin-left: auto;
+	padding: 5px 11px;
+	font-size: 0.82rem;
+	font-weight: 500;
+	color: var(--text-muted);
+	background: var(--surface-2);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+}
+
+.navbtn:hover {
+	color: var(--text);
+	filter: none;
+}
+
+.navbtn[aria-pressed="true"] {
+	color: var(--accent);
+	background: var(--accent-weak);
+	border-color: var(--accent);
+}
+
+/* ---- privacy mode (nav "Blur €" toggle) ------------------------- */
+
+.money,
+.sensitive {
+	transition: filter 0.12s ease;
+}
+
+/* .money — euro figures; .sensitive — identifying/quantity values
+   (holding symbols, share counts) that also shouldn't be readable
+   over a shoulder. */
+.privacy-mode .money,
+.privacy-mode .sensitive {
+	filter: blur(0.42em);
+	user-select: none;
+}
+
+/* Hovering one figure reveals just that figure — a deliberate act, so
+   a public-space glance still stays blurred. */
+.privacy-mode .money:hover,
+.privacy-mode .sensitive:hover {
+	filter: none;
+}
+
+/* Charts stay visible in privacy mode — the toggle hides the euro
+   figures in the tables, not the shape of the data. */
+
+.gain-pos {
+	color: var(--pos);
+}
+
+.gain-neg {
+	color: var(--neg);
+}
+
+/* ---- layout ------------------------------------------------------- */
+
+.container {
+	max-width: 1120px;
+	margin: 0 auto;
+	padding: 28px 24px 72px;
+}
+
+.page-head {
+	margin: 4px 0 22px;
+}
+
+.page-head h1 {
+	margin: 0;
+	font-size: 1.4rem;
+	font-weight: 650;
+	letter-spacing: -0.02em;
+}
+
+h1,
+h2,
+h3 {
+	color: var(--text);
+}
+
+.card {
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	padding: 18px 20px;
+	margin-bottom: var(--gap);
+	box-shadow: var(--shadow);
+}
+
+.card > h2 {
+	margin: 0 0 14px;
+	font-size: 0.78rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--text-muted);
+}
+
+.card > .disclosure > summary {
+	font-size: 0.78rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.card > .disclosure[open] > summary {
+	margin-bottom: 14px;
+}
+
+.card > h3 {
+	margin: 18px 0 10px;
+	font-size: 0.92rem;
+	font-weight: 600;
+}
+
+.card > p {
+	margin: 10px 0;
+}
+
+.card > p:first-of-type {
+	margin-top: 0;
+}
+
+.muted,
+.card em {
+	color: var(--text-muted);
+	font-size: 0.86rem;
+}
+
+/* ---- tables ------------------------------------------------------- */
+
+table.data {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.9rem;
+	font-variant-numeric: tabular-nums;
+}
+
+table.data + table.data {
+	margin-top: 16px;
+}
+
+table.data th {
+	text-align: left;
+	font-size: 0.7rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--text-muted);
+	padding: 8px 12px;
+	border-bottom: 1px solid var(--border-strong);
+	white-space: nowrap;
+}
+
+table.data td {
+	padding: 9px 12px;
+	border-bottom: 1px solid var(--border);
+	vertical-align: top;
+}
+
+table.data tbody tr:last-child td {
+	border-bottom: none;
+}
+
+table.data tbody tr:hover td {
+	background: var(--surface-2);
+}
+
+table.data th:first-child,
+table.data td:first-child {
+	padding-left: 4px;
+}
+
+table.data tr:last-child th,
+table.data tbody tr th {
+	font-size: 0.9rem;
+	text-transform: none;
+	letter-spacing: 0;
+	color: var(--text);
+	border-top: 1px solid var(--border-strong);
+	border-bottom: none;
+	padding-top: 10px;
+}
+
+/* ---- forms ------------------------------------------------------- */
+
+.form-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 12px;
+}
+
+.form-row + table.data,
+table.data + .form-row {
+	margin-top: 14px;
+}
+
+label {
+	font-size: 0.86rem;
+	color: var(--text-muted);
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+}
+
+input[type="text"],
+input[type="date"],
+input[type="file"],
+select {
+	font: inherit;
+	font-size: 0.88rem;
+	color: var(--text);
+	background: var(--surface);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	padding: 6px 9px;
+}
+
+input[type="text"],
+input[type="date"] {
+	min-width: 150px;
+}
+
+input:focus,
+select:focus,
+button:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 1px;
+}
+
+td form {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+}
+
+button {
+	font: inherit;
+	font-size: 0.86rem;
+	font-weight: 550;
+	cursor: pointer;
+	padding: 6px 13px;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--accent);
+	background: var(--accent);
+	color: #fff;
+	transition: filter 0.12s ease;
+}
+
+button:hover {
+	filter: brightness(1.07);
+}
+
+td form button {
+	background: var(--surface);
+	color: var(--accent);
+	font-weight: 500;
+	padding: 5px 10px;
+}
+
+td form button:hover {
+	background: var(--accent-weak);
+	filter: none;
+}
+
+/* ---- links, code, emphasis ------------------------------------- */
+
+a {
+	color: var(--accent);
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+}
+
+code {
+	font-family: var(--font-mono);
+	font-size: 0.85em;
+	background: var(--surface-2);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	padding: 1px 5px;
+}
+
+strong {
+	font-weight: 650;
+	color: var(--text);
+}
+
+/* A per-row error/blocking note is rendered as <strong> inside a table
+   cell; tint those red without depending on a class. Paragraph-level
+   <strong> (e.g. the portfolio's headline total) is left neutral. */
+td strong {
+	color: var(--neg);
+}
+
+/* ---- charts ---------------------------------------------------- */
+
+.chart-card {
+	position: relative;
+	height: 320px;
+}
+
+.chart-card canvas {
+	position: absolute;
+	inset: 0;
+}
+
+/* ---- audit trail --------------------------------------------- */
+
+.audit-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	font-size: 0.88rem;
+}
+
+.audit-list li {
+	padding: 12px 0;
+	border-bottom: 1px solid var(--border);
+	font-family: var(--font-mono);
+	font-size: 0.82rem;
+	line-height: 1.7;
+	color: var(--text-muted);
+}
+
+.audit-list li:last-child {
+	border-bottom: none;
+}
+
+@media (max-width: 640px) {
+	.container {
+		padding: 20px 14px 56px;
+	}
+
+	.topnav-inner {
+		padding: 0 14px;
+	}
+
+	table.data {
+		display: block;
+		overflow-x: auto;
+	}
+}

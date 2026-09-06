@@ -1,0 +1,26 @@
+{
+  "year": 2024,
+  "holdings": [
+    {
+      "instrument": "AAPL",
+      "disposals": [
+        {"date": "2024-06-01", "quantity": "10", "proceeds": "3000", "cost_basis": "1000", "gain": "2000"}
+      ],
+      "realised_gain": "2000"
+    },
+    {
+      "instrument": "MSFT",
+      "disposals": [
+        {"date": "2024-07-01", "quantity": "10", "proceeds": "4000", "cost_basis": "1000", "gain": "3000"}
+      ],
+      "realised_gain": "3000"
+    }
+  ],
+  "net_chargeable_gain": "5000",
+  "loss_brought_forward": "0",
+  "loss_brought_forward_used": "0",
+  "loss_carried_forward": "0",
+  "annual_exemption_used": "1270",
+  "taxable_gain": "3730",
+  "tax_due": "1230"
+}

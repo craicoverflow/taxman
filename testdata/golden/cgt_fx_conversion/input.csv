@@ -1,0 +1,4 @@
+platform,type,date,instrument,quantity,price,currency
+ibkr,buy,2021-01-25,US_STOCK,10,100,USD
+ibkr,buy,2022-06-15,US_STOCK,10,120,USD
+ibkr,sell,2024-01-02,US_STOCK,15,200,USD
