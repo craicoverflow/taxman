@@ -1,0 +1,44 @@
+name: Publish docs
+
+# Publishes docs/maths.html to GitHub Pages as the site's index page.
+# The HTML is committed and CI's check-docs step guarantees it is in
+# sync with docs/maths.md and features/, so this workflow only needs to
+# stage and deploy it — no Go build.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/maths.html
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage site
+        run: |
+          mkdir _site
+          cp docs/maths.html _site/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
