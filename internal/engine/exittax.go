@@ -38,16 +38,17 @@ type ExitTaxResult struct {
 // in euro at transaction-date ECB rates by the shared matcher, the
 // same as ComputeCGT.
 //
-// This function handles only actual disposals — it does not yet track
-// or compute deemed disposal (the 8-year clock is task 4.7; deemed
-// disposal's liability computation is task 4.9, blocked pending a
-// Revenue TDM citation per SPEC.md §6).
+// This function handles ACTUAL disposals only. It does not apply the
+// 8-year deemed disposal (TCA 1997 s.747E(6)), so a fund lot held past
+// an anniversary is under-taxed here. ComputeFundTax is the complete
+// path — it covers both kinds of chargeable event and is what the
+// dashboard and `taxman report` call. ComputeExitTax remains for the
+// single-holding disposal mechanics the golden fixtures exercise, and
+// for callers that have no Valuer.
 //
-// CAVEAT (flagged, not blocked, per tasks/plan.md task 4.5): this
-// assumes plain FIFO matching order for exit-tax disposals, mirroring
-// CGT. Whether Revenue's exit-tax rules actually match in FIFO order
-// has not been separately verified — worth a light check before
-// relying on this for a real filing.
+// FIFO matching order is no longer an assumption for this regime:
+// Revenue TDM Part 27-04-01 §4.1.5 directs that "where there has been a
+// movement in units, the gain should be calculated on a FIFO basis".
 func ComputeExitTax(txs []ledger.Transaction) (*ExitTaxResult, error) {
 	disposals, _, err := matchDisposalsFIFO(txs, "ComputeExitTax")
 	if err != nil {

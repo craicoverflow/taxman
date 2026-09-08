@@ -69,7 +69,42 @@ type cgtYearResultJSON struct {
 	TaxDue                 string               `json:"tax_due"`
 }
 
-var validKinds = map[string]bool{"cgt": true, "cgt_year": true, "exit_tax": true, "dirt": true}
+// deemedDisposalJSON and fundTaxResultJSON mirror
+// testdata/golden/deemed_disposal_*/expected.json — a fund holding's
+// chargeable events across both kinds: 8-year deemed disposals and
+// actual disposals, with the deemed-disposal credit applied.
+type deemedDisposalJSON struct {
+	AnniversaryDate string `json:"anniversary_date"`
+	LotAcquired     string `json:"lot_acquired"`
+	Quantity        string `json:"quantity"`
+	Value           string `json:"value"`
+	CostBasis       string `json:"cost_basis"`
+	Gain            string `json:"gain"`
+	CumulativeTax   string `json:"cumulative_tax"`
+	CreditUsed      string `json:"credit_used"`
+	TaxDue          string `json:"tax_due"`
+}
+
+type fundDisposalJSON struct {
+	disposalJSON
+	TaxBeforeCredit string `json:"tax_before_credit"`
+	CreditUsed      string `json:"credit_used"`
+	TaxDue          string `json:"tax_due"`
+}
+
+type fundTaxResultJSON struct {
+	Instrument      string               `json:"instrument"`
+	DeemedDisposals []deemedDisposalJSON `json:"deemed_disposals"`
+	Disposals       []fundDisposalJSON   `json:"disposals"`
+	TotalGain       string               `json:"total_gain"`
+	TaxableGain     string               `json:"taxable_gain"`
+	TaxBeforeCredit string               `json:"tax_before_credit"`
+	CreditUsed      string               `json:"credit_used"`
+	TaxDue          string               `json:"tax_due"`
+	RefundDue       string               `json:"refund_due"`
+}
+
+var validKinds = map[string]bool{"cgt": true, "cgt_year": true, "exit_tax": true, "dirt": true, "deemed": true}
 
 // runValidate implements `taxman validate --fixture <dir> --kind <cgt|exit_tax|dirt>`.
 // dir must contain input.csv (platform,type,date,instrument,quantity,
@@ -81,20 +116,20 @@ var validKinds = map[string]bool{"cgt": true, "cgt_year": true, "exit_tax": true
 func runValidate(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fixtureDir := fs.String("fixture", "", "path to a golden fixture directory (must contain input.csv and expected.json)")
-	kind := fs.String("kind", "", "which engine computation to validate: cgt, cgt_year, exit_tax, or dirt")
-	year := fs.Int("year", 0, "tax year (required for --kind cgt_year)")
+	kind := fs.String("kind", "", "which engine computation to validate: cgt, cgt_year, exit_tax, deemed, or dirt")
+	year := fs.Int("year", 0, "tax year (required for --kind cgt_year and --kind deemed)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	if *fixtureDir == "" {
-		return fmt.Errorf("usage: taxman validate --fixture <dir> --kind <cgt|cgt_year|exit_tax|dirt> [--year YYYY]")
+		return fmt.Errorf("usage: taxman validate --fixture <dir> --kind <cgt|cgt_year|exit_tax|deemed|dirt> [--year YYYY]")
 	}
 	if !validKinds[*kind] {
-		return fmt.Errorf("validate: invalid --kind %q (expected cgt, cgt_year, exit_tax, or dirt)", *kind)
+		return fmt.Errorf("validate: invalid --kind %q (expected cgt, cgt_year, exit_tax, deemed, or dirt)", *kind)
 	}
-	if *kind == "cgt_year" && *year == 0 {
-		return fmt.Errorf("validate: --kind cgt_year requires --year YYYY")
+	if (*kind == "cgt_year" || *kind == "deemed") && *year == 0 {
+		return fmt.Errorf("validate: --kind %s requires --year YYYY", *kind)
 	}
 
 	txs, err := readFixtureInput(filepath.Join(*fixtureDir, "input.csv"))
@@ -107,7 +142,7 @@ func runValidate(args []string) error {
 		return fmt.Errorf("validate: reading expected.json: %w", err)
 	}
 
-	actual, err := computeForKind(*kind, txs, *year)
+	actual, err := computeForKind(*kind, txs, *year, *fixtureDir)
 	if err != nil {
 		return fmt.Errorf("validate: computing %s: %w", *kind, err)
 	}
@@ -129,7 +164,7 @@ func runValidate(args []string) error {
 	return nil
 }
 
-func computeForKind(kind string, txs []ledger.Transaction, year int) (interface{}, error) {
+func computeForKind(kind string, txs []ledger.Transaction, year int, fixtureDir string) (interface{}, error) {
 	switch kind {
 	case "cgt":
 		result, err := engine.ComputeCGT(txs)
@@ -159,6 +194,21 @@ func computeForKind(kind string, txs []ledger.Transaction, year int) (interface{
 			return nil, err
 		}
 		return toExitTaxResultJSON(result), nil
+
+	case "deemed":
+		instrument, err := soleInstrument(txs)
+		if err != nil {
+			return nil, err
+		}
+		values, err := readFixtureValuations(filepath.Join(fixtureDir, "valuations.csv"))
+		if err != nil {
+			return nil, err
+		}
+		result, err := engine.ComputeFundTaxForYear(instrument, txs, values, year)
+		if err != nil {
+			return nil, err
+		}
+		return toFundTaxResultJSON(result), nil
 
 	case "dirt":
 		result, err := engine.ComputeDIRT(txs)
@@ -328,4 +378,142 @@ func jsonEqual(expected, actual []byte) (bool, jsonDiff, error) {
 	prettyExpected, _ := json.MarshalIndent(expectedVal, "", "  ")
 	prettyActual, _ := json.MarshalIndent(actualVal, "", "  ")
 	return false, jsonDiff{expected: string(prettyExpected), actual: string(prettyActual)}, nil
+}
+
+// soleInstrument returns the one instrument a fixture's transactions
+// all belong to. Deemed disposal is computed per holding — the 8-year
+// clock runs on a lot, not on a portfolio — so a fixture mixing
+// instruments would have no single answer.
+func soleInstrument(txs []ledger.Transaction) (string, error) {
+	instruments := groupByInstrument(txs)
+	if len(instruments) != 1 {
+		return "", fmt.Errorf("--kind deemed expects one instrument per fixture, found %d", len(instruments))
+	}
+	for instrument := range instruments {
+		return instrument, nil
+	}
+	return "", fmt.Errorf("--kind deemed: fixture has no transactions")
+}
+
+// fixtureValuer is a golden fixture's stand-in for
+// internal/valuations.Store: the anniversary values the engine refuses
+// to guess, read from the fixture's valuations.csv instead of the DB.
+type fixtureValuer map[string]struct {
+	value    decimal.Decimal
+	currency string
+}
+
+func (f fixtureValuer) ValuePerUnit(instrument string, on time.Time) (decimal.Decimal, string, bool, error) {
+	entry, ok := f[instrument+"@"+on.UTC().Format("2006-01-02")]
+	if !ok {
+		return decimal.Zero, "", false, nil
+	}
+	return entry.value, entry.currency, true, nil
+}
+
+// readFixtureValuations parses a golden fixture's valuations.csv:
+// header instrument,date,value_per_unit,currency. A fixture with no
+// such file is valid — it just has no anniversary values, which is
+// itself a scenario worth pinning (the engine must then block).
+func readFixtureValuations(path string) (fixtureValuer, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fixtureValuer{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	reader := csv.NewReader(f)
+	header, err := reader.Read()
+	if err != nil {
+		return nil, fmt.Errorf("reading header of %s: %w", path, err)
+	}
+	wantHeader := []string{"instrument", "date", "value_per_unit", "currency"}
+	if len(header) != len(wantHeader) {
+		return nil, fmt.Errorf("%s: expected header %v, got %v", path, wantHeader, header)
+	}
+	for i, want := range wantHeader {
+		if strings.TrimSpace(header[i]) != want {
+			return nil, fmt.Errorf("%s: expected header %v, got %v", path, wantHeader, header)
+		}
+	}
+
+	out := fixtureValuer{}
+	rowNum := 1
+	for {
+		record, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s: reading row %d: %w", path, rowNum+1, err)
+		}
+		rowNum++
+
+		if len(record) != len(wantHeader) {
+			return nil, fmt.Errorf("%s: row %d: expected %d columns, got %d", path, rowNum, len(wantHeader), len(record))
+		}
+		date, err := time.Parse("2006-01-02", strings.TrimSpace(record[1]))
+		if err != nil {
+			return nil, fmt.Errorf("%s: row %d: parsing date %q: %w", path, rowNum, record[1], err)
+		}
+		value, err := decimal.NewFromString(strings.TrimSpace(record[2]))
+		if err != nil {
+			return nil, fmt.Errorf("%s: row %d: parsing value_per_unit %q: %w", path, rowNum, record[2], err)
+		}
+
+		out[strings.TrimSpace(record[0])+"@"+date.Format("2006-01-02")] = struct {
+			value    decimal.Decimal
+			currency string
+		}{value: value, currency: strings.TrimSpace(record[3])}
+	}
+
+	return out, nil
+}
+
+func toFundTaxResultJSON(r *engine.FundTaxResult) fundTaxResultJSON {
+	deemed := make([]deemedDisposalJSON, len(r.DeemedDisposals))
+	for i, d := range r.DeemedDisposals {
+		deemed[i] = deemedDisposalJSON{
+			AnniversaryDate: d.AnniversaryDate.Format("2006-01-02"),
+			LotAcquired:     d.LotAcquired.Format("2006-01-02"),
+			Quantity:        d.Quantity.String(),
+			Value:           d.Value.String(),
+			CostBasis:       d.CostBasis.String(),
+			Gain:            d.Gain.String(),
+			CumulativeTax:   d.CumulativeTax.String(),
+			CreditUsed:      d.CreditUsed.String(),
+			TaxDue:          d.TaxDue.String(),
+		}
+	}
+
+	disposals := make([]fundDisposalJSON, len(r.Disposals))
+	for i, d := range r.Disposals {
+		disposals[i] = fundDisposalJSON{
+			disposalJSON: disposalJSON{
+				Date:      d.Date.Format("2006-01-02"),
+				Quantity:  d.Quantity.String(),
+				Proceeds:  d.Proceeds.String(),
+				CostBasis: d.CostBasis.String(),
+				Gain:      d.Gain.String(),
+			},
+			TaxBeforeCredit: d.TaxBeforeCredit.String(),
+			CreditUsed:      d.CreditUsed.String(),
+			TaxDue:          d.TaxDue.String(),
+		}
+	}
+
+	return fundTaxResultJSON{
+		Instrument:      r.Instrument,
+		DeemedDisposals: deemed,
+		Disposals:       disposals,
+		TotalGain:       r.TotalGain.String(),
+		TaxableGain:     r.TaxableGain.String(),
+		TaxBeforeCredit: r.TaxBeforeCredit.String(),
+		CreditUsed:      r.CreditUsed.String(),
+		TaxDue:          r.TaxDue.String(),
+		RefundDue:       r.RefundDue.String(),
+	}
 }

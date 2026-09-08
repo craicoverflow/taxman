@@ -29,7 +29,7 @@ Full detail (acceptance criteria, dependencies, checkpoints) in `tasks/plan.md`.
 - [x] 4.6 Exit-tax rate transition (41%→38%)
 - [x] 4.7 Deemed-disposal 8-year anniversary tracking (date arithmetic only)
 - [ ] 4.8 [BLOCKED — ask first] TCA s.581 four-week loss-restriction matching
-- [ ] 4.9 [BLOCKED — ask first] Deemed-disposal liability + credit/refund
+- [x] 4.9 Deemed-disposal liability + credit/refund (unblocked Sept 2026 — TDM Part 27-04-01 §4.1.4–4.1.6, Part 27-01A-02 §4.4.5)
 - [ ] **CHECKPOINT 4** — review before Phase 5
 
 ## Phase 5 — internal/audit

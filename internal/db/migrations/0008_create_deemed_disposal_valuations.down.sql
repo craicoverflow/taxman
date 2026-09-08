@@ -1,0 +1,1 @@
+DROP TABLE deemed_disposal_valuations;

@@ -26,17 +26,20 @@ Feature: Known limitations — where taxman's figure must not be used as-is
       And the taxable gain is €0.00
       And the CGT due is €0.00
 
-  Scenario: The 8-year deemed disposal date is tracked, but no liability is computed
-    A fund lot acquired on 15 March 2020 has its first deemed-disposal
-    anniversary on 15 March 2028, and every 8 years after (Finance Act
-    2013; Revenue "Funds"). taxman reports this date so it is not missed;
-    it does NOT turn a reached anniversary into an exit-tax charge, nor
-    handle the credit given for it against a later actual disposal. Those
-    are computed outside taxman.
+  Scenario: A deemed disposal cannot be computed without the anniversary value
+    The 8-year charge itself IS computed — see deemed_disposal.feature —
+    but it needs the market value of the units on the anniversary, and
+    taxman has no historical price source: internal/prices serves a last
+    price and is walled off from the engine by design (SPEC.md sections 4
+    and 9). That value is user-entered, and until it is entered the
+    holding does not compute at all. This is a data gap, not an
+    arithmetic one, and it is deliberately loud: an estimated value would
+    produce a plausible, wrong, unfalsifiable figure.
 
     Given an EXIT_TAX_FUND holding "IE_ETF"
-    When the next deemed-disposal date is computed for a lot acquired on 2020-03-15, as of 2026-09-06
-    Then the next deemed-disposal date is 2028-03-15
+      And a buy of 100 "IE_ETF" at €10.00 on 2016-03-15
+    When fund tax is computed for the 2024 tax year
+    Then the holding is blocked pending a market value
 
   Scenario: An unclassified holding blocks its own computation
     taxman never guesses CGT_ASSET vs EXIT_TAX_FUND. Until a human sets

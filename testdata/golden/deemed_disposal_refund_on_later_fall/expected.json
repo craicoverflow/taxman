@@ -1,0 +1,34 @@
+{
+  "instrument": "IE_ETF",
+  "deemed_disposals": [
+    {
+      "anniversary_date": "2024-03-15",
+      "lot_acquired": "2016-03-15",
+      "quantity": "100",
+      "value": "1800",
+      "cost_basis": "1000",
+      "gain": "800",
+      "cumulative_tax": "328",
+      "credit_used": "0",
+      "tax_due": "328"
+    }
+  ],
+  "disposals": [
+    {
+      "date": "2024-09-01",
+      "quantity": "100",
+      "proceeds": "800",
+      "cost_basis": "1000",
+      "gain": "-200",
+      "tax_before_credit": "0",
+      "credit_used": "328",
+      "tax_due": "-328"
+    }
+  ],
+  "total_gain": "600",
+  "taxable_gain": "800",
+  "tax_before_credit": "328",
+  "credit_used": "328",
+  "tax_due": "328",
+  "refund_due": "328"
+}

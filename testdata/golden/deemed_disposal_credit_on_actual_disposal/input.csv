@@ -1,0 +1,3 @@
+platform,type,date,instrument,quantity,price,currency
+degiro,buy,2016-03-15,IE_ETF,100,10,EUR
+degiro,sell,2024-09-01,IE_ETF,100,20,EUR

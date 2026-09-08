@@ -41,9 +41,15 @@ type world struct {
 	holdings map[string]*holding
 	current  string
 
+	// values holds the market values a scenario states with a "the
+	// market value of ... is ... per unit" step — the user-entered
+	// anniversary figures engine.ComputeFundTax refuses to guess.
+	values featureValuer
+
 	cgt        *engine.CGTResult
 	cgtYear    *engine.CGTYearResult
 	exitTax    *engine.ExitTaxResult
+	fundTax    *engine.FundTaxResult
 	dirt       *engine.DIRTResult
 	disposals  []engine.Disposal
 	rate       *taxrules.Rate
@@ -58,6 +64,7 @@ func newWorld(uri string, line int) *world {
 		scenarioURI:  uri,
 		scenarioLine: line,
 		holdings:     map[string]*holding{},
+		values:       featureValuer{},
 	}
 }
 
@@ -226,4 +233,26 @@ func quoteOrBare(s string) string {
 		return s
 	}
 	return `"` + s + `"`
+}
+
+// featureValuer is the scenario-level stand-in for
+// internal/valuations.Store, satisfying engine.Valuer from values a
+// Given step stated. Every value a .feature file states is in euro,
+// which is what the worked examples are written in.
+type featureValuer map[string]decimal.Decimal
+
+func (f featureValuer) key(instrument string, on time.Time) string {
+	return instrument + "@" + on.UTC().Format(dateLayout)
+}
+
+func (f featureValuer) set(instrument string, on time.Time, value decimal.Decimal) {
+	f[f.key(instrument, on)] = value
+}
+
+func (f featureValuer) ValuePerUnit(instrument string, on time.Time) (decimal.Decimal, string, bool, error) {
+	value, ok := f[f.key(instrument, on)]
+	if !ok {
+		return decimal.Zero, "", false, nil
+	}
+	return value, "EUR", true, nil
 }

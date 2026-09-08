@@ -37,6 +37,7 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^an RSU vest of ([\d.]+) "([^"]+)" at €([\d.]+) on (\d{4}-\d{2}-\d{2})$`, stepVestEUR)
 	ctx.Step(`^an RSU vest of ([\d.]+) "([^"]+)" at ([\d.]+) ([A-Z]{3}) on (\d{4}-\d{2}-\d{2})$`, stepVestCcy)
 	ctx.Step(`^an interest credit of €([\d.]+) on (\d{4}-\d{2}-\d{2})$`, stepInterest)
+	ctx.Step(`^the market value of "([^"]+)" on (\d{4}-\d{2}-\d{2}) is €([\d.,]+) per unit$`, stepMarketValue)
 
 	// --- When: run a computation ---------------------------------
 	ctx.Step(`^CGT is computed for the holding$`, stepComputeCGT)
@@ -50,6 +51,8 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the (CGT|exit tax|DIRT) rate on (\d{4}-\d{2}-\d{2}) is looked up$`, stepLookupRate)
 	ctx.Step(`^the next deemed-disposal date is computed for a lot acquired on (\d{4}-\d{2}-\d{2}), as of (\d{4}-\d{2}-\d{2})$`, stepDeemedDate)
 	ctx.Step(`^tax is computed with the holding left unclassified$`, stepComputeUnclassified)
+	ctx.Step(`^fund tax is computed for the (\d{4}) tax year$`, stepComputeFundTaxYear)
+	ctx.Step(`^fund tax is computed as of (\d{4}-\d{2}-\d{2})$`, stepComputeFundTaxAsOf)
 
 	// --- Then: check the pinned figure ---------------------------
 	ctx.Step(`^the total gain is (\S+)$`, stepThenTotalGain)
@@ -74,6 +77,16 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the rule takes effect from (\S+)$`, stepThenRuleEffectiveFrom)
 	ctx.Step(`^the (?:lookup|computation|match) is rejected$`, stepThenRejected)
 	ctx.Step(`^the next deemed-disposal date is (\S+)$`, stepThenDeemedDate)
+	ctx.Step(`^deemed disposal (\d+) has a quantity of (\S+)$`, stepThenDeemedQuantity)
+	ctx.Step(`^deemed disposal (\d+) has a value of (\S+)$`, stepThenDeemedValue)
+	ctx.Step(`^deemed disposal (\d+) has a cost basis of (\S+)$`, stepThenDeemedCostBasis)
+	ctx.Step(`^deemed disposal (\d+) has a gain of (\S+)$`, stepThenDeemedGain)
+	ctx.Step(`^deemed disposal (\d+) has a credit of (\S+)$`, stepThenDeemedCredit)
+	ctx.Step(`^deemed disposal (\d+) charges (\S+)$`, stepThenDeemedCharge)
+	ctx.Step(`^disposal (\d+) has a credit of (\S+)$`, stepThenDisposalCredit)
+	ctx.Step(`^disposal (\d+) charges (\S+)$`, stepThenDisposalCharge)
+	ctx.Step(`^the refund due is (\S+)$`, stepThenRefundDue)
+	ctx.Step(`^the holding is blocked pending a market value$`, stepThenBlockedPendingValue)
 	ctx.Step(`^computation is blocked for "([^"]+)"$`, stepThenBlocked)
 	ctx.Step(`^the reason given is (\S.*)$`, stepThenBlockReason)
 }
@@ -146,6 +159,21 @@ func stepInterest(ctx context.Context, amount, date string) error {
 	return addTx(ctx, ledger.TypeInterest, "1", "Savings account", amount, "EUR", date)
 }
 
+func stepMarketValue(ctx context.Context, instrument, date, amount string) error {
+	w := worldFrom(ctx)
+	d, err := parseDate(date)
+	if err != nil {
+		return err
+	}
+	value, err := parseAmount(amount)
+	if err != nil {
+		return err
+	}
+	w.holdingNamed(instrument)
+	w.values.set(instrument, d.UTC(), value)
+	return nil
+}
+
 // ---- When -----------------------------------------------------------
 
 // A When step never fails the scenario on an engine error: it stashes
@@ -203,6 +231,34 @@ func stepComputeExitTaxYear(ctx context.Context, year string) error {
 		return err
 	}
 	w.exitTax, w.whenErr = engine.ComputeExitTaxForYear(h.txs, y)
+	return nil
+}
+
+func stepComputeFundTaxYear(ctx context.Context, year string) error {
+	w := worldFrom(ctx)
+	h, err := w.currentHolding()
+	if err != nil {
+		return err
+	}
+	y, err := parseYear(year)
+	if err != nil {
+		return err
+	}
+	w.fundTax, w.whenErr = engine.ComputeFundTaxForYear(h.name, h.txs, w.values, y)
+	return nil
+}
+
+func stepComputeFundTaxAsOf(ctx context.Context, asOf string) error {
+	w := worldFrom(ctx)
+	h, err := w.currentHolding()
+	if err != nil {
+		return err
+	}
+	as, err := parseDate(asOf)
+	if err != nil {
+		return err
+	}
+	w.fundTax, w.whenErr = engine.ComputeFundTax(h.name, h.txs, w.values, as.UTC())
 	return nil
 }
 
@@ -300,6 +356,8 @@ func stepThenTotalGain(ctx context.Context, want string) error {
 		return assertDecimal(w, "the total gain is "+want, want, w.cgt.TotalGain, formatEUR)
 	case w.exitTax != nil:
 		return assertDecimal(w, "the total gain is "+want, want, w.exitTax.TotalGain, formatEUR)
+	case w.fundTax != nil:
+		return assertDecimal(w, "the total gain is "+want, want, w.fundTax.TotalGain, formatEUR)
 	default:
 		return fmt.Errorf(`"the total gain is" needs a "When CGT/exit tax is computed for the holding" step first`)
 	}
@@ -355,6 +413,8 @@ func stepThenTaxableGain(ctx context.Context, want string) error {
 		return assertDecimal(w, stepText, want, w.cgt.TaxableGain, formatEUR)
 	case w.exitTax != nil:
 		return assertDecimal(w, stepText, want, w.exitTax.TaxableGain, formatEUR)
+	case w.fundTax != nil:
+		return assertDecimal(w, stepText, want, w.fundTax.TaxableGain, formatEUR)
 	default:
 		return fmt.Errorf(`"the taxable gain is" needs a CGT or exit-tax When step first`)
 	}
@@ -388,10 +448,15 @@ func stepThenCGTDue(ctx context.Context, want string) error {
 
 func stepThenExitTaxDue(ctx context.Context, want string) error {
 	w := worldFrom(ctx)
-	if w.exitTax == nil {
+	stepText := "the exit tax due is " + want
+	switch {
+	case w.exitTax != nil:
+		return assertDecimal(w, stepText, want, w.exitTax.TaxDue, formatEUR)
+	case w.fundTax != nil:
+		return assertDecimal(w, stepText, want, w.fundTax.TaxDue, formatEUR)
+	default:
 		return fmt.Errorf(`"the exit tax due is" needs an exit-tax When step first`)
 	}
-	return assertDecimal(w, "the exit tax due is "+want, want, w.exitTax.TaxDue, formatEUR)
 }
 
 func stepThenTotalInterest(ctx context.Context, want string) error {
@@ -420,6 +485,11 @@ func (w *world) disposalN(n string) (engine.Disposal, error) {
 	}
 	if ds == nil && w.exitTax != nil {
 		ds = w.exitTax.Disposals
+	}
+	if ds == nil && w.fundTax != nil {
+		for _, d := range w.fundTax.Disposals {
+			ds = append(ds, d.Disposal)
+		}
 	}
 	idx, err := parseInt(n)
 	if err != nil || idx < 1 || idx > len(ds) {
@@ -609,4 +679,126 @@ func trimQuotes(s string) string {
 		return s[1 : len(s)-1]
 	}
 	return s
+}
+
+// ---- Then: deemed disposal ------------------------------------------
+
+func (w *world) deemedN(n string) (engine.DeemedDisposal, error) {
+	if err := w.needOK(); err != nil {
+		return engine.DeemedDisposal{}, err
+	}
+	if w.fundTax == nil {
+		return engine.DeemedDisposal{}, fmt.Errorf(`"deemed disposal ..." needs a "When fund tax is computed ..." step first`)
+	}
+	idx, err := parseInt(n)
+	if err != nil || idx < 1 || idx > len(w.fundTax.DeemedDisposals) {
+		return engine.DeemedDisposal{}, fmt.Errorf("no deemed disposal %s (there are %d)", n, len(w.fundTax.DeemedDisposals))
+	}
+	return w.fundTax.DeemedDisposals[idx-1], nil
+}
+
+func stepThenDeemedQuantity(ctx context.Context, n, want string) error {
+	w := worldFrom(ctx)
+	d, err := w.deemedN(n)
+	if err != nil {
+		return err
+	}
+	return assertDecimal(w, fmt.Sprintf("deemed disposal %s has a quantity of %s", n, want), want, d.Quantity, decimalPlain)
+}
+
+func stepThenDeemedValue(ctx context.Context, n, want string) error {
+	w := worldFrom(ctx)
+	d, err := w.deemedN(n)
+	if err != nil {
+		return err
+	}
+	return assertDecimal(w, fmt.Sprintf("deemed disposal %s has a value of %s", n, want), want, d.Value, formatEUR)
+}
+
+func stepThenDeemedCostBasis(ctx context.Context, n, want string) error {
+	w := worldFrom(ctx)
+	d, err := w.deemedN(n)
+	if err != nil {
+		return err
+	}
+	return assertDecimal(w, fmt.Sprintf("deemed disposal %s has a cost basis of %s", n, want), want, d.CostBasis, formatEUR)
+}
+
+func stepThenDeemedGain(ctx context.Context, n, want string) error {
+	w := worldFrom(ctx)
+	d, err := w.deemedN(n)
+	if err != nil {
+		return err
+	}
+	return assertDecimal(w, fmt.Sprintf("deemed disposal %s has a gain of %s", n, want), want, d.Gain, formatEUR)
+}
+
+func stepThenDeemedCredit(ctx context.Context, n, want string) error {
+	w := worldFrom(ctx)
+	d, err := w.deemedN(n)
+	if err != nil {
+		return err
+	}
+	return assertDecimal(w, fmt.Sprintf("deemed disposal %s has a credit of %s", n, want), want, d.CreditUsed, formatEUR)
+}
+
+func stepThenDeemedCharge(ctx context.Context, n, want string) error {
+	w := worldFrom(ctx)
+	d, err := w.deemedN(n)
+	if err != nil {
+		return err
+	}
+	return assertDecimal(w, fmt.Sprintf("deemed disposal %s charges %s", n, want), want, d.TaxDue, formatEUR)
+}
+
+func (w *world) fundDisposalN(n string) (engine.FundDisposal, error) {
+	if err := w.needOK(); err != nil {
+		return engine.FundDisposal{}, err
+	}
+	if w.fundTax == nil {
+		return engine.FundDisposal{}, fmt.Errorf(`"disposal ... charges/has a credit of ..." needs a "When fund tax is computed ..." step first`)
+	}
+	idx, err := parseInt(n)
+	if err != nil || idx < 1 || idx > len(w.fundTax.Disposals) {
+		return engine.FundDisposal{}, fmt.Errorf("no disposal %s (there are %d)", n, len(w.fundTax.Disposals))
+	}
+	return w.fundTax.Disposals[idx-1], nil
+}
+
+func stepThenDisposalCredit(ctx context.Context, n, want string) error {
+	w := worldFrom(ctx)
+	d, err := w.fundDisposalN(n)
+	if err != nil {
+		return err
+	}
+	return assertDecimal(w, fmt.Sprintf("disposal %s has a credit of %s", n, want), want, d.CreditUsed, formatEUR)
+}
+
+func stepThenDisposalCharge(ctx context.Context, n, want string) error {
+	w := worldFrom(ctx)
+	d, err := w.fundDisposalN(n)
+	if err != nil {
+		return err
+	}
+	return assertDecimal(w, fmt.Sprintf("disposal %s charges %s", n, want), want, d.TaxDue, formatEUR)
+}
+
+func stepThenRefundDue(ctx context.Context, want string) error {
+	w := worldFrom(ctx)
+	if w.fundTax == nil {
+		return fmt.Errorf(`"the refund due is" needs a "When fund tax is computed ..." step first`)
+	}
+	return assertDecimal(w, "the refund due is "+want, want, w.fundTax.RefundDue, formatEUR)
+}
+
+// stepThenBlockedPendingValue asserts the failure path: the engine
+// refused to compute because an anniversary was reached with no market
+// value on record, rather than estimating one.
+func stepThenBlockedPendingValue(ctx context.Context) error {
+	w := worldFrom(ctx)
+	var missing *engine.MissingValuationError
+	if !errors.As(w.whenErr, &missing) {
+		return fmt.Errorf("expected the holding to be blocked pending a market value, got %v", w.whenErr)
+	}
+	return nil
 }

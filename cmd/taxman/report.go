@@ -17,6 +17,7 @@ import (
 	"github.com/craicoverflow/taxman/internal/db"
 	"github.com/craicoverflow/taxman/internal/engine"
 	"github.com/craicoverflow/taxman/internal/ledger"
+	"github.com/craicoverflow/taxman/internal/valuations"
 )
 
 // reportHolding is one holding's contribution to a tax-year report.
@@ -34,6 +35,8 @@ type reportHolding struct {
 	RealisedGain   string `json:"realised_gain,omitempty"` // net in-year gain/loss; CGT + exit-tax holdings
 	TaxableGain    string `json:"taxable_gain,omitempty"`  // exit-tax holdings only
 	TaxDue         string `json:"tax_due,omitempty"`       // exit-tax holdings only
+	RefundDue      string `json:"refund_due,omitempty"`    // exit-tax holdings only; repayable deemed-disposal tax
+	DeemedCharges  int    `json:"deemed_charges,omitempty"`
 	Interest       string `json:"interest,omitempty"`
 	Error          string `json:"error,omitempty"`
 
@@ -122,6 +125,12 @@ func buildYearReport(conn *sql.DB, year int) (*yearReport, error) {
 
 	classifier := classify.NewStore(conn)
 
+	// Deemed-disposal anniversary values (internal/valuations). A fund
+	// lot past an 8-year boundary with no value on record blocks only
+	// its own holding — the error lands on that reportHolding, and
+	// every other holding still reports.
+	values := valuations.NewStore(conn)
+
 	byInstrument := map[string][]ledger.Transaction{}
 	for _, tx := range txs {
 		byInstrument[tx.Instrument] = append(byInstrument[tx.Instrument], tx)
@@ -175,13 +184,17 @@ func buildYearReport(conn *sql.DB, year int) (*yearReport, error) {
 
 		case classify.ExitTaxFund:
 			holding.kind = "exit_tax"
-			realisedGain, taxableGain, taxDue, err := reportYearExitTax(holdingTxs, year)
+			result, err := engine.ComputeFundTaxForYear(instrument, holdingTxs, values, year)
 			if err != nil {
 				holding.Error = err.Error()
 			} else {
-				holding.RealisedGain = realisedGain.String()
-				holding.TaxableGain = taxableGain.String()
-				holding.TaxDue = taxDue.String()
+				holding.RealisedGain = result.TotalGain.String()
+				holding.TaxableGain = result.TaxableGain.String()
+				holding.TaxDue = result.TaxDue.String()
+				if result.RefundDue.IsPositive() {
+					holding.RefundDue = result.RefundDue.String()
+				}
+				holding.DeemedCharges = len(result.DeemedDisposals)
 			}
 		}
 
@@ -249,17 +262,6 @@ func buildCGTYearSummary(
 	}
 }
 
-// reportYearExitTax computes a single exit-tax holding's in-year
-// position: realised gain (raw sum, may be negative), taxable gain
-// (positive disposals only — no loss relief), and tax due.
-func reportYearExitTax(txs []ledger.Transaction, year int) (realisedGain, taxableGain, taxDue decimal.Decimal, err error) {
-	result, err := engine.ComputeExitTaxForYear(txs, year)
-	if err != nil {
-		return decimal.Zero, decimal.Zero, decimal.Zero, err
-	}
-	return result.TotalGain, result.TaxableGain, result.TaxDue, nil
-}
-
 // reportYearDIRT computes DIRT on interest credits dated within year,
 // returning hasInterest=false if there were none (distinguishing "no
 // interest this year" from "zero interest, but there was a credit").
@@ -310,6 +312,12 @@ func printText(report *yearReport) {
 			fmt.Printf("  exit tax realised gain (this year): %s\n", h.RealisedGain)
 			fmt.Printf("  exit tax taxable gain: %s\n", h.TaxableGain)
 			fmt.Printf("  exit tax tax due: %s\n", h.TaxDue)
+			if h.DeemedCharges > 0 {
+				fmt.Printf("  including %d 8-year deemed disposal(s)\n", h.DeemedCharges)
+			}
+			if h.RefundDue != "" {
+				fmt.Printf("  repayable (deemed-disposal tax already paid): %s\n", h.RefundDue)
+			}
 		}
 		if h.Interest != "" {
 			fmt.Printf("  DIRT due on interest: %s\n", h.Interest)

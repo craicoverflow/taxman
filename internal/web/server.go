@@ -28,6 +28,7 @@ import (
 	"github.com/craicoverflow/taxman/internal/ledger"
 	"github.com/craicoverflow/taxman/internal/prices"
 	"github.com/craicoverflow/taxman/internal/tickers"
+	"github.com/craicoverflow/taxman/internal/valuations"
 )
 
 // maxUploadSize bounds how much of a multipart upload is buffered in
@@ -68,6 +69,7 @@ type Server struct {
 	classifyStore *classify.Store
 	auditStore    *audit.Store
 	tickerStore   *tickers.Store
+	valuesStore   *valuations.Store
 
 	// quoter fetches live market prices for the portfolio page; rate
 	// converts a quote's native currency to euro. Both are seams for
@@ -87,6 +89,7 @@ func NewServer(conn *sql.DB) *Server {
 		classifyStore: classify.NewStore(conn),
 		auditStore:    audit.NewStore(conn),
 		tickerStore:   tickers.NewStore(conn),
+		valuesStore:   valuations.NewStore(conn),
 		quoter:        prices.NewHTTPQuoter(prices.WithCache(prices.NewSQLiteCache(conn))),
 		rate:          fx.Rate,
 	}
@@ -98,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleDashboard)
 	mux.HandleFunc("/audit/", s.handleAuditDetail)
+	mux.HandleFunc("/valuations", s.handleValuation)
 	mux.HandleFunc("/import", s.handleImport)
 	mux.HandleFunc("/classify", s.handleClassify)
 	mux.HandleFunc("/interest", s.handleInterest)
@@ -251,6 +255,14 @@ type holdingRow struct {
 	RealisedGain string
 	TaxableGain  string
 	TaxDue       string
+
+	// RefundDue and DeemedCharges describe the 8-year deemed-disposal
+	// side of an exit-tax holding: how many anniversaries were charged
+	// in the scope in view, and how much tax paid on an earlier
+	// anniversary has since become repayable.
+	RefundDue     string
+	DeemedCharges int
+
 	ComputeError string // set instead of the above when computation failed for this holding alone
 }
 
@@ -264,9 +276,13 @@ type dashboardSummary struct {
 	CGTTaxDue     string
 	CGTError      string // set when CGT could not be aggregated (a holding failed to FIFO-match)
 	ExitTaxTaxDue string
-	DIRTInterest  string
-	DIRTTaxDue    string
-	DIRTError     string
+	// ExitTaxRefundDue is deemed-disposal tax already paid that has
+	// since become repayable, shown separately because it is a separate
+	// line on a return — it is not netted off ExitTaxTaxDue.
+	ExitTaxRefundDue string
+	DIRTInterest     string
+	DIRTTaxDue       string
+	DIRTError        string
 
 	// CGTDetail is populated only when a single tax year is selected —
 	// the year-level breakdown from engine.CGTYearResult. CGTAllYears
@@ -350,15 +366,21 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	instruments := distinctInstruments(holdingTxs)
 
-	computeExitTax := func(holdingTxs []ledger.Transaction) (*engine.ExitTaxResult, error) {
+	// Fund holdings are computed across both chargeable events — actual
+	// disposals and 8-year deemed disposals (engine.ComputeFundTax).
+	// With no year selected the clock runs to today: an anniversary
+	// that has passed is a charge that has arisen, whether or not a
+	// return has been filed for it yet.
+	computeFundTax := func(instrument string, holdingTxs []ledger.Transaction) (*engine.FundTaxResult, error) {
 		if selectedYear == 0 {
-			return engine.ComputeExitTax(holdingTxs)
+			return engine.ComputeFundTax(instrument, holdingTxs, s.valuesStore, time.Now().UTC())
 		}
-		return engine.ComputeExitTaxForYear(holdingTxs, selectedYear)
+		return engine.ComputeFundTaxForYear(instrument, holdingTxs, s.valuesStore, selectedYear)
 	}
 
 	summary := dashboardSummary{}
 	exitTaxDue := decimal.Zero
+	exitTaxRefund := decimal.Zero
 	var disposals []engine.Disposal
 
 	// CGT is aggregated at the tax-year level (one €1,270 exemption,
@@ -401,15 +423,22 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 		case classify.ExitTaxFund:
 			row.Kind = "exit_tax"
-			result, err := computeExitTax(byInstrument[instrument])
+			result, err := computeFundTax(instrument, byInstrument[instrument])
 			if err != nil {
 				row.ComputeError = err.Error()
 			} else {
 				row.RealisedGain = result.TotalGain.String()
 				row.TaxableGain = result.TaxableGain.String()
 				row.TaxDue = result.TaxDue.String()
+				row.DeemedCharges = len(result.DeemedDisposals)
+				if result.RefundDue.IsPositive() {
+					row.RefundDue = result.RefundDue.String()
+				}
 				exitTaxDue = exitTaxDue.Add(result.TaxDue)
-				disposals = append(disposals, result.Disposals...)
+				exitTaxRefund = exitTaxRefund.Add(result.RefundDue)
+				for _, d := range result.Disposals {
+					disposals = append(disposals, d.Disposal)
+				}
 			}
 		}
 
@@ -465,6 +494,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		summary.CGTTaxDue = cgtTaxDue.String()
 	}
 	summary.ExitTaxTaxDue = exitTaxDue.String()
+	if exitTaxRefund.IsPositive() {
+		summary.ExitTaxRefundDue = exitTaxRefund.String()
+	}
 
 	// DIRT is computed once across every interest credit (optionally
 	// year-scoped), not per holding — interest isn't tied to a
@@ -539,8 +571,26 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		sort.Sort(sort.Reverse(sort.IntSlice(years)))
 	}
 
+	// The schedule is built at the same point in time the liability
+	// above was computed at, so "due" means the same thing in both
+	// halves of the page: with a year selected, 31 December of that
+	// year (mirroring engine.ComputeFundTaxForYear); with "all years",
+	// today.
+	scheduleAsOf := time.Now().UTC()
+	if selectedYear != 0 {
+		scheduleAsOf = time.Date(selectedYear, 12, 31, 0, 0, 0, 0, time.UTC)
+	}
+
+	anniversaries, needValues, err := s.anniversarySchedule(instruments, byInstrument, scheduleAsOf)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("building the deemed-disposal schedule: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	if err := dashboardTemplate.Execute(w, dashboardData{
 		Holdings:          rows,
+		Anniversaries:     anniversaries,
+		NeedValues:        needValues,
 		Platforms:         ingest.Platforms,
 		Summary:           summary,
 		InterestCredits:   interestCredits,
@@ -1430,8 +1480,27 @@ type interestCreditRow struct {
 	Source string
 }
 
+// anniversaryRow is one 8-year deemed-disposal boundary on the
+// dashboard's schedule: which lot, when, how many units, and whether
+// the market value it needs has been entered yet. A reached
+// anniversary with no value is what blocks a holding from computing at
+// all, so it is shown first and shown loudly.
+type anniversaryRow struct {
+	Instrument   string
+	Description  string
+	LotAcquired  string
+	Date         string
+	Quantity     string
+	Reached      bool
+	HaveValue    bool
+	ValuePerUnit string
+	Currency     string
+}
+
 type dashboardData struct {
 	Holdings          []holdingRow
+	Anniversaries     []anniversaryRow
+	NeedValues        int // reached anniversaries with no value on record
 	Platforms         []string
 	Summary           dashboardSummary
 	InterestCredits   []interestCreditRow
@@ -1488,6 +1557,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 <tbody>
 <tr><td>CGT</td><td></td><td>{{if .Summary.CGTError}}<strong>error: {{.Summary.CGTError}}</strong>{{else}}{{eur .Summary.CGTTaxDue}}{{end}}</td></tr>
 <tr><td>Exit tax</td><td></td><td>{{eur .Summary.ExitTaxTaxDue}}</td></tr>
+{{if .Summary.ExitTaxRefundDue}}<tr><td>Exit tax repayable (deemed-disposal tax already paid)</td><td></td><td>&minus;{{eur .Summary.ExitTaxRefundDue}}</td></tr>{{end}}
 <tr><td>DIRT</td><td>{{eur .Summary.DIRTInterest}}</td><td>{{if .Summary.DIRTError}}<strong>error: {{.Summary.DIRTError}}</strong>{{else}}{{eur .Summary.DIRTTaxDue}}{{end}}</td></tr>
 <tr><th>Total</th><th></th><th>{{eur .Summary.TotalLiability}}</th></tr>
 </tbody>
@@ -1505,6 +1575,43 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 <tr><td>Loss carried forward to later years</td><td>{{eur .Summary.CGTLossCarriedForward}}</td></tr>
 </tbody>
 </table>
+{{end}}
+</section>
+
+<section class="card">
+<h2>8-year deemed disposals{{if .NeedValues}} &mdash; {{.NeedValues}} awaiting a market value{{end}}</h2>
+<p>A fund lot is taxed every 8 years whether or not it is sold (TCA 1997 s.747E(6)). The charge is the value of the units on the anniversary less their original cost. taxman has no historical price source and will not estimate that value &mdash; enter it below, and the holding computes.</p>
+{{if .Anniversaries}}
+<table class="data">
+<thead><tr><th>Anniversary</th><th>Holding</th><th>Lot acquired</th><th>Units</th><th>Status</th><th>Value per unit</th></tr></thead>
+<tbody>
+{{range .Anniversaries}}
+<tr>
+<td>{{.Date}}</td>
+<td>{{if .Description}}{{.Description}} ({{.Instrument}}){{else}}{{.Instrument}}{{end}}</td>
+<td>{{.LotAcquired}}</td>
+<td>{{.Quantity}}</td>
+<td>{{if not .Reached}}upcoming{{else if .HaveValue}}charged{{else}}<strong>needs a market value</strong>{{end}}</td>
+<td>
+{{if .Reached}}
+{{if .HaveValue}}{{.ValuePerUnit}} {{.Currency}}{{end}}
+<form class="form-row" action="/valuations" method="post">
+<input type="hidden" name="instrument" value="{{.Instrument}}">
+<input type="hidden" name="date" value="{{.Date}}">
+<input type="text" name="value" size="10" placeholder="per unit" required>
+<input type="text" name="currency" size="4" value="EUR">
+<button type="submit">{{if .HaveValue}}Correct{{else}}Save{{end}}</button>
+</form>
+{{else}}
+&mdash;
+{{end}}
+</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+{{else}}
+<p><em>No fund lot has an 8-year anniversary yet. Classify a holding EXIT_TAX_FUND for its lots to appear here.</em></p>
 {{end}}
 </section>
 
@@ -1623,7 +1730,7 @@ function addInterestRow() {
 {{else}}
 <td>{{eur .RealisedGain}}</td>
 <td>{{if eq .Kind "cgt"}}&mdash;{{else}}{{eur .TaxableGain}}{{end}}</td>
-<td>{{if eq .Kind "cgt"}}&mdash;{{else}}{{eur .TaxDue}}{{end}}</td>
+<td>{{if eq .Kind "cgt"}}&mdash;{{else}}{{eur .TaxDue}}{{if .DeemedCharges}}<br><small>incl. {{.DeemedCharges}} 8-year deemed disposal(s)</small>{{end}}{{if .RefundDue}}<br><small>{{eur .RefundDue}} repayable</small>{{end}}{{end}}</td>
 {{end}}
 <td><a href="/audit/{{.Instrument}}">audit trail</a></td>
 </tr>
@@ -1844,3 +1951,147 @@ var auditDetailTemplate = template.Must(template.New("audit").Parse(pageShell("t
 </ul>
 <p><a href="/">&larr; back to dashboard</a></p>
 </section>`)))
+
+// handleValuation records one 8-year deemed-disposal anniversary value:
+// POST /valuations with "instrument", "date" (YYYY-MM-DD, the
+// anniversary), "value" (positive decimal, per unit) and "currency"
+// (ISO 4217, defaulting to EUR).
+//
+// This is the only way an anniversary value enters taxman. There is no
+// import path and no price lookup: internal/prices serves a last price
+// and is kept out of internal/engine by SPEC.md §4, and no provider
+// offers the historical close an 8-year-old anniversary needs. Until a
+// value is entered for a reached anniversary, that holding's tax does
+// not compute at all — which is the intended behaviour, not a gap to
+// paper over with an estimate.
+//
+// Re-submitting the same instrument and date corrects the value rather
+// than adding a second one: the value of one holding on one day is a
+// single fact.
+func (s *Server) handleValuation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parsing form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	instrument := strings.TrimSpace(r.FormValue("instrument"))
+	if instrument == "" {
+		http.Error(w, "valuations: instrument is required", http.StatusBadRequest)
+		return
+	}
+
+	date, err := time.Parse("2006-01-02", strings.TrimSpace(r.FormValue("date")))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("valuations: date must be YYYY-MM-DD: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	value, err := decimal.NewFromString(strings.TrimSpace(r.FormValue("value")))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("valuations: value per unit must be a number: %v", err), http.StatusBadRequest)
+		return
+	}
+	if !value.IsPositive() {
+		http.Error(w, "valuations: value per unit must be positive", http.StatusBadRequest)
+		return
+	}
+
+	currency := strings.ToUpper(strings.TrimSpace(r.FormValue("currency")))
+	if currency == "" {
+		currency = "EUR"
+	}
+
+	if err := s.valuesStore.Upsert(valuations.Valuation{
+		Instrument:   instrument,
+		Date:         date.UTC(),
+		ValuePerUnit: value,
+		Currency:     currency,
+	}); err != nil {
+		http.Error(w, fmt.Sprintf("valuations: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// anniversarySchedule builds the dashboard's deemed-disposal schedule
+// across every EXIT_TAX_FUND holding: each 8-year boundary reached as
+// of asOf, plus the next one ahead for each lot still held, annotated
+// with whether the market value it needs is on record.
+//
+// asOf is the same instant the liability on the page was computed at,
+// so a row marked reached is one the figures above actually depend on.
+// Only a reached anniversary gets a value-entry form: a value cannot be
+// entered for a date that has not happened, and an upcoming boundary is
+// there to be seen coming, not acted on.
+//
+// It deliberately does not compute tax. The whole point of the
+// schedule is to be readable when the values are missing — that is
+// exactly when the user needs to know which ones to go and find.
+//
+// A holding whose transactions can't be walked at all (an oversell) is
+// skipped rather than failing the dashboard: that holding's own row
+// already carries the error.
+func (s *Server) anniversarySchedule(instruments []string, byInstrument map[string][]ledger.Transaction, asOf time.Time) ([]anniversaryRow, int, error) {
+	var out []anniversaryRow
+	needValues := 0
+
+	for _, instrument := range instruments {
+		classification, err := s.classifyStore.Classify(instrument)
+		if err != nil {
+			return nil, 0, fmt.Errorf("classifying %s: %w", instrument, err)
+		}
+		if classification != classify.ExitTaxFund {
+			continue
+		}
+
+		due, err := engine.DeemedDisposalSchedule(byInstrument[instrument], asOf)
+		if err != nil {
+			continue
+		}
+
+		for _, d := range due {
+			row := anniversaryRow{
+				Instrument:  instrument,
+				Description: holdingDescription(byInstrument[instrument]),
+				LotAcquired: d.LotAcquired.Format("2006-01-02"),
+				Date:        d.AnniversaryDate.Format("2006-01-02"),
+				Quantity:    d.Quantity.String(),
+				Reached:     d.Reached,
+			}
+
+			value, ok, err := s.valuesStore.Get(instrument, d.AnniversaryDate)
+			if err != nil {
+				return nil, 0, fmt.Errorf("looking up the value for %s on %s: %w", instrument, row.Date, err)
+			}
+			if ok {
+				row.HaveValue = true
+				row.ValuePerUnit = value.ValuePerUnit.String()
+				row.Currency = value.Currency
+			} else if d.Reached {
+				needValues++
+			}
+
+			out = append(out, row)
+		}
+	}
+
+	// Reached-but-unvalued first (they block computation), then the
+	// rest in date order.
+	sort.SliceStable(out, func(i, j int) bool {
+		iBlocking := out[i].Reached && !out[i].HaveValue
+		jBlocking := out[j].Reached && !out[j].HaveValue
+		if iBlocking != jBlocking {
+			return iBlocking
+		}
+		return out[i].Date < out[j].Date
+	})
+
+	return out, needValues, nil
+}

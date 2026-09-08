@@ -127,12 +127,13 @@ Degiro chosen first: flat single-section CSV (one row per buy/sell), no multi-se
 - Buildable now: engine detects a repurchase within 4 weeks of a CGT disposal and raises an explicit `"unverified rule: s.581"` error instead of silently applying plain FIFO.
 - Dependencies: 4.2.
 
-**4.9 — [BLOCKED — ask first] Deemed-disposal liability + credit/refund on subsequent actual disposal**
-- No implementation yet. Per SPEC §6: obtain and present the Revenue TDM citation for credit/refund mechanics before writing expected output.
-- Buildable now: any fund lot past its 4.7 anniversary causes engine to raise an explicit, lot-identifying `"unverified rule: deemed disposal"` error.
+**4.9 — [DONE, September 2026] Deemed-disposal liability + credit/refund on subsequent actual disposal**
+- Unblocked by Revenue TDM Part 27-04-01 §4.1.4 (original cost on the later disposal; total tax capped at the actual disposal's own charge), §4.1.5 (gain = value at the anniversary less cost, FIFO), §4.1.6 (no loss relief), Part 27-01A-02 §4.4.5 (offset then repay the excess), and the TCA Notes for Guidance on s.747E(2)–(4) (refundable/available for set-off). Citations reproduced in `docs/maths.md` §8.1 and in each `.feature` scenario.
+- Built: `engine.ComputeFundTax` / `ComputeFundTaxForYear` (both chargeable-event kinds in one pass), `engine.DeemedDisposalSchedule` (what needs a value, what is next due), `internal/valuations` + migration 0008 for the user-entered anniversary values, `POST /valuations` and the dashboard schedule, `taxman validate --kind deemed`, and audit records carrying each event's own rule version.
+- The lot-identifying error survives, now for the case that actually remains: `engine.MissingValuationError` when a reached anniversary has no market value on record. It blocks that holding only.
 - Dependencies: 4.7, 1.2.
 
-**CHECKPOINT 4** — review all six unblocked fixtures' expected outputs (hand-checked locally against the spreadsheet — never committed); confirm per-holding (not whole-run) `UNCLASSIFIED` blocking matches intent; reconfirm 4.8/4.9 stay blocked pending TDM citations.
+**CHECKPOINT 4** — review all unblocked fixtures' expected outputs (hand-checked locally against the spreadsheet — never committed); confirm per-holding (not whole-run) `UNCLASSIFIED` blocking matches intent; reconfirm 4.8 stays blocked pending a TDM citation (4.9 cleared that gate in September 2026).
 
 ---
 

@@ -62,15 +62,24 @@ mutually exclusive regimes, plus a blocking "don't know" state:
   `summarizeExitTax` adds only the positive per-disposal gains, so
   `ExitTaxResult.TaxableGain` cannot be reduced by any loss, on this
   holding or another.
-- **The 8-year deemed disposal.** Every fund lot is treated as sold and
-  reacquired on the 8th anniversary of its acquisition (and every 8
-  years after), triggering a tax charge even with no actual sale.
-  `NextDeemedDisposalAnniversary` (`internal/engine/deemeddisposal.go`)
-  tracks the dates today; **turning a reached anniversary into a
-  liability figure, and the later actual-disposal credit/refund, is
-  NOT built** — blocked pending a cited Revenue TDM source (task 4.9).
-  That code path fails loudly with `"unverified rule: ..."` rather than
-  computing a plausible-looking wrong number.
+- **The 8-year deemed disposal.** Every fund lot is treated as sold on
+  the 8th anniversary of its acquisition (and every 8 years after),
+  triggering a tax charge with no actual sale (TCA 1997 s.747E(6)).
+  `engine.ComputeFundTax` computes it: gain = the units' market value on
+  the anniversary less their **original** cost; a later chargeable event
+  recomputes from that same original cost and **credits** the tax
+  already paid, capped at the later event's own charge, with any excess
+  **repayable** (Revenue TDM Part 27-04-01 §4.1.4–4.1.5, Part 27-01A-02
+  §4.4.5). The deemed *reacquisition* in s.747E(6) is **not** a base
+  uplift — treating it as one gives the wrong number.
+  `NextDeemedDisposalAnniversary` and `DeemedDisposalSchedule` answer
+  the date questions without computing anything.
+  **The one thing taxman cannot derive is the anniversary market
+  value.** It is user-entered (`internal/valuations`, `POST
+  /valuations`); a reached anniversary with no value on record fails
+  loudly with `MissingValuationError`, blocking that holding alone.
+  Never add a fallback, a default, or a `internal/prices` lookup for
+  it.
 - **Rate transition by event date.** Exit tax is 41% before
   2026-01-01 and 38% on or after (Finance Act 2025). A disposal dated
   2025-12-31 resolves to 41% no matter when the computation runs —
@@ -116,7 +125,8 @@ The pipeline, all in `internal/engine`, operating on immutable
    - **Not implemented:** TCA **s.581** four-week
      sell-then-repurchase loss restriction. Plain FIFO is used and may
      be wrong in that window; blocked pending a Revenue TDM citation
-     (task 4.8), same loud-failure discipline as deemed disposal.
+     (task 4.8), the same loud-failure discipline a missing anniversary
+     value gets.
 3. **DIRT** is separate — no lots. `ComputeDIRT` sums
    `interest`-type credits (hand-entered savings interest, against an
    account the user names; see `internal/ingest/interest`) and applies
@@ -182,7 +192,8 @@ internal/
     interest/                    hand-entered interest credits, account named by the user
   classify/            CGT_ASSET / EXIT_TAX_FUND / UNCLASSIFIED override table
   taxrules/            effective-dated rate & exemption schedules + env overrides
-  engine/              FIFO lot matching, CGT / exit-tax / DIRT, deemed-disposal clock, OpenPositions
+  engine/              FIFO lot matching, CGT / exit-tax / DIRT, 8-year deemed disposal, OpenPositions
+  valuations/          user-entered deemed-disposal anniversary values (never inferred)
   fx/                  ECB reference-rate EUR conversion (embedded eurofxref-hist.csv)
   audit/               links computed figures → transactions + rule versions
   prices/              live market quotes (Finnhub→Yahoo→stooq), in-proc + SQLite cache. LEAF — no engine/audit/ledger import
@@ -268,17 +279,19 @@ From SPEC §6 — the ones most likely to bite:
   mapping.
 
 **Ask first**
-- Implementing **s.581** matching or **deemed-disposal credit/refund**
-  liability — surface the Revenue TDM citation for confirmation before
-  writing the expected side of those fixtures. Until then these paths
-  fail loud; keep them that way.
+- Implementing **s.581** matching — surface the Revenue TDM citation
+  for confirmation before writing the expected side of that fixture.
+  Until then that path fails loud; keep it that way. (Deemed disposal
+  cleared this gate in September 2026 — see `docs/maths.md` §8.1 for
+  the citations. Changing its mechanics needs the same treatment.)
 - Any new `go.mod` dependency, especially anything that can make
   network calls (a CDN `<script>` in the UI is not a `go.mod` dep; a
   provider SDK would be).
 - A non-backward-compatible DB schema change against ingested history.
-- `report --format pdf`, a deemed-disposal deadline timeline, or a
-  historical portfolio-value time series — all deferred, not just
-  unimplemented.
+- `report --format pdf` or a historical portfolio-value time series —
+  both deferred, not just unimplemented. (The deemed-disposal
+  anniversary schedule is now a dashboard table; a *charted* timeline
+  is still deferred.)
 - A second credentialed price provider, or widening what Finnhub
   receives.
 - Committing or pushing to git (standing instruction).
@@ -299,7 +312,7 @@ From SPEC §6 — the ones most likely to bite:
 
 - **TDD with golden files.** No `taxrules`/`engine` logic before a
   failing test exists. Fixtures live in `testdata/golden/`, one per tax
-  scenario (see SPEC §5 for the built list and the two still blocked).
+  scenario (see SPEC §5 for the built list and the one still blocked).
 - **The maths spec** (SPEC §14). `docs/maths.md` describes every engine
   calculation in plain English with its Irish tax-law citation;
   `features/*.feature` (godog) are executable worked examples whose
@@ -331,7 +344,9 @@ backfilled years; FIFO CGT / exit-tax / DIRT with EUR restatement,
 whole-euro rounding, and audit records; **year-level CGT aggregation**
 (`AggregateCGTYear`: one exemption/year, cross-holding loss netting,
 loss carry-forward) + per-year exit-tax/DIRT + `report`;
-deemed-disposal **date** clock; dashboard with charts, hand-entered
+the **8-year deemed disposal** (charge, credit on a later disposal,
+repayment of an excess) over user-entered anniversary values; dashboard
+with charts, an anniversary schedule, hand-entered
 interest entry (user-named accounts), hand-entered RSU vests
 (`POST /rsu`), a tax-year selector, and a nav "Blur €" privacy
 toggle (blurs every money figure, strips chart value-axes/tooltips,
@@ -339,6 +354,6 @@ toggle (blurs every money figure, strips chart value-axes/tooltips,
 `/portfolio` with live prices, per-holding + total P&L %, ticker
 remap, and a durable price cache.
 
-Blocked (fail loud, do not implement without a cited source): s.581
-four-week loss restriction (task 4.8); deemed-disposal liability and
-later actual-disposal credit/refund (task 4.9).
+Blocked (fails loud, do not implement without a cited source): s.581
+four-week loss restriction (task 4.8). Blocked on **data**, not law: a
+deemed disposal whose anniversary market value has not been entered.

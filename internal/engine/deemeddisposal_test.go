@@ -96,9 +96,12 @@ func TestNextDeemedDisposalAnniversary_DoesNotComputeLiability(t *testing.T) {
 	// This is a compile-time/structural assertion as much as a
 	// runtime one: NextDeemedDisposalAnniversary takes no Classifier,
 	// no taxrules.Kind, and returns only a time.Time - it has no way
-	// to touch internal/taxrules or produce a liability figure, which
-	// is the explicit split required by tasks/plan.md task 4.7 (that's
-	// task 4.9, blocked pending a Revenue TDM citation).
+	// to touch internal/taxrules or produce a liability figure. The
+	// split is deliberate and still worth holding: the date questions
+	// ("when is the next one", "which ones need a value") must stay
+	// answerable on a holding whose anniversary values have not been
+	// entered yet, which is exactly when they are asked. Liability is
+	// ComputeFundTax's job.
 	lot := Lot{
 		AcquiredDate: mustDate(t, "2020-03-15"),
 		Quantity:     decimal.NewFromInt(10),

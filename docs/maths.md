@@ -33,7 +33,7 @@ build (`make ci`).
 | Tax | What `taxman` computes | Regime |
 |---|---|---|
 | **Capital Gains Tax (CGT)** | Gains on disposals of `CGT_ASSET` holdings — individual shares, most US-domiciled ETFs, vested RSU shares | §6, §7 |
-| **Fund exit tax** | Gains on disposals of `EXIT_TAX_FUND` holdings — Irish/EU-domiciled UCITS ETFs and equivalent offshore funds | §8 |
+| **Fund exit tax** | Gains on disposals of `EXIT_TAX_FUND` holdings — Irish/EU-domiciled UCITS ETFs and equivalent offshore funds — including the 8-year deemed disposal | §8, §8.1 |
 | **Deposit Interest Retention Tax (DIRT)** | Tax on hand-entered deposit interest (any savings account) | §9 |
 
 A holding is `CGT_ASSET` or `EXIT_TAX_FUND` **only** because a human set
@@ -43,8 +43,8 @@ single most consequential question and `taxman` never answers it
 itself.
 
 Not computed at all: income tax on dividends or on RSU vesting (that is
-payroll's), the four-week loss rule, deemed-disposal *liability*, and
-anything filed to Revenue (§11).
+payroll's), the four-week loss rule, and anything filed to Revenue
+(§11).
 
 ---
 
@@ -307,13 +307,88 @@ Three ways this differs from CGT, each pinned in
    positive gains. (Example: a €1,000 gain and a €700 loss on the same
    fund in the same year are taxed as €1,000, not €300.)
 
-`taxman` also tracks the 8-year deemed-disposal date for each fund lot,
-but does **not** compute the tax charge for it — §11.2.
+FIFO matching is not an assumption for this regime — it is directed:
+"Where there has been a movement in units, the gain should be calculated
+on a **FIFO basis**" (Revenue Tax and Duty Manual Part 27-04-01 §4.1.5).
 
-> **Not separately verified:** that Revenue's exit-tax rules match
-> disposals in strict FIFO order (as CGT does). `taxman` assumes so.
-> Worth a check before relying on an exit-tax figure for a fund with
-> multiple purchase lots.
+### 8.1 The 8-year deemed disposal
+
+A fund is not left to roll up untaxed forever. A material interest is
+**deemed disposed of at the end of each 8-year period** from its
+acquisition, and every 8 years after, whether or not anything is
+actually sold (TCA 1997 s.747E(6); the equivalent for Irish investment
+undertakings is s.739D(2)(ddd)). The charge is on the date itself — 8
+years to the day from the acquisition of that lot, per lot, FIFO.
+
+The gain is **the value of the units on that date less their cost of
+acquisition** (TDM Part 27-04-01 §4.1.5):
+
+```
+gain at anniversary = units still held × value per unit on that date
+                        − their original cost
+cumulative tax      = max(gain, 0) × exit-tax rate ON THE ANNIVERSARY DATE
+charge now          = cumulative tax − tax already paid on those units
+```
+
+**The anniversary value is entered by hand.** `taxman` has no historical
+price source — `internal/prices` serves a last price and is deliberately
+walled off from the calculation engine — so rather than estimate the
+value it **refuses to compute the holding at all** until a value is on
+record for that date, naming the lot and the date that need one (§11.2).
+
+**The later disposal is measured from the original cost, and the tax
+already paid is credited.** s.747E(6) frames the deemed disposal as a
+disposal *and reacquisition at market value*, but that reacquisition is
+**not** a base uplift: "The original cost of acquisition should be used
+in carrying out the calculation of the taxable gain... where the
+disposal occurs after the deemed disposal", and "the total tax liability
+(between deemed and actual disposals) should not exceed the tax
+liability that arises on the actual disposal" (TDM Part 27-04-01
+§4.1.4). Each later event — another anniversary or a real sale —
+therefore recomputes the whole gain from the original cost and credits
+what has already been paid. The same rule appears on the
+investment-undertaking side as "a previous '8-year event' is disregarded
+in calculating the gain" (s.739D(2A)).
+
+**Where the credit exceeds the later charge, the excess comes back.**
+If the units fall, tax already paid on a paper gain that never
+materialised is repayable: "Where a gain is treated as nil and tax was
+chargeable in respect of an earlier deemed disposal of the material
+interest, the overpaid amount is refundable/available for set-off"
+(Notes for Guidance, s.747E(2)–(4)); and on the investment-undertaking
+side, "Exit tax already paid in connection with the ending of an 8-year
+period may be offset against exit tax due on a subsequent chargeable
+event. Where an overpayment of exit tax arises after such offset, the
+excess is repaid" (TDM Part 27-01A-02 §4.4.5).
+
+Worked example, pinned in
+[`deemed_disposal.feature`](../features/deemed_disposal.feature). Buy
+100 units at €10 on 15 March 2016 (cost €1,000):
+
+| Event | Date | Gain from original cost | Tax at 41% | Credit | Charge |
+|---|---|---|---|---|---|
+| 8-year deemed disposal, valued at €18 | 2024-03-15 | €800 | €328 | — | **€328** |
+| Sold at €20 | 2024-09-01 | €1,000 | €410 | €328 | **€82** |
+
+Total €410 — exactly the tax on the actual disposal, which is the cap
+§4.1.4 imposes. Had the units instead been sold at €12, the actual
+disposal's tax would be €82, the €328 credit would exceed it, and **€246
+would be repayable**.
+
+A partial sale carries its share of the credit with it and leaves the
+rest attached to the units still held; units sold before an anniversary
+never reach one.
+
+> **Not separately verified:** which chapter applies to an
+> Irish-domiciled ETF held through a broker. `taxman` computes every
+> `EXIT_TAX_FUND` holding under the offshore-fund rules above
+> (s.747AA–747FA). An Irish-domiciled fund is an *investment
+> undertaking* under Chapter 1A instead, and s.739G(3) says a chargeable
+> event "cannot occur" for units held in a recognised clearing system —
+> which is how a broker holds them. The arithmetic is the same either
+> way (same rate, same original-cost-plus-credit mechanic, self-assessed
+> in both cases), so this does not change a figure; it may change which
+> panel of the Form 11 it belongs in.
 
 ---
 
@@ -398,20 +473,23 @@ normally (§7.1). A CGT return covering a sell-and-rebuy inside four
 weeks **must be adjusted by hand**. Blocked pending a cited Revenue
 source for the exact expected figures.
 
-### 11.2 The 8-year deemed-disposal charge
+### 11.2 A deemed disposal with no anniversary value on record
 
-Under the fund regime, tax is levied eight years after an investment is
-made, and every eight years after that, whether or not a disposal
-actually occurs (Revenue, *Funds*; TCA 1997 s.739E). `taxman`:
+The 8-year charge itself **is** computed (§8.1). What `taxman` cannot
+supply is its one external input: the market value of the units on the
+anniversary date. There is no historical price source in the tool, and
+`internal/prices` — which serves a last price for the portfolio page —
+is deliberately kept out of the calculation engine and the audit trail.
 
-- **does** track the next deemed-disposal date for every fund lot
-  (acquisition + 8 years, + 16, …), so it is not missed;
-- **does not** turn a reached anniversary into an exit-tax charge, and
-  does not handle the credit for that charge against the eventual actual
-  disposal.
+So the value is entered by hand, and a lot that has reached an
+anniversary with no value on record **blocks that holding's whole
+computation**, naming the lot and the date. Other holdings in the same
+run are unaffected.
 
-Those figures are computed outside `taxman`. Blocked pending a cited
-Revenue source for the credit/refund mechanics.
+This is a data gap, not an arithmetic one, and it fails loudly on
+purpose: an estimated anniversary value would produce a plausible,
+wrong, unfalsifiable figure — the exact failure mode this tool exists to
+avoid.
 
 ### 11.3 An unclassified holding
 
@@ -454,7 +532,8 @@ trusted for a return.
 | DIRT: total × rate at credit date; historical rates | §9 | [`dirt.feature`](../features/dirt.feature) | `dirt_simple`, `dirt_historical_rate` |
 | Effective-dated rate lookup | §10 | [`rate_schedule.feature`](../features/rate_schedule.feature) | (all of the above) |
 | Round the tax down to whole euro | §2 | [`whole_euro_rounding.feature`](../features/whole_euro_rounding.feature) | `cgt_fx_conversion` |
-| s.581, deemed-disposal charge, unclassified holding | §11 | [`known_limitations.feature`](../features/known_limitations.feature) | — |
+| 8-year deemed disposal: charge, credit, repayment | §8.1 | [`deemed_disposal.feature`](../features/deemed_disposal.feature) | `deemed_disposal_first_event`, `deemed_disposal_credit_on_actual_disposal`, `deemed_disposal_refund_on_later_fall` |
+| s.581, missing anniversary value, unclassified holding | §11 | [`known_limitations.feature`](../features/known_limitations.feature) | — |
 
 To run every scenario: `make bdd`. To rebuild the pinned figures after
 an engine change: `make regen-features` (the build fails if this is not
@@ -472,8 +551,12 @@ September 2026):
   (CGT rate); s.31 (aggregation of gains and losses); s.532, s.545,
   s.552 (assets, consideration, allowable cost); s.581 (disposals of
   marketable shares — four-week rule); s.601 (annual exempt amount);
-  Part 27 Chapter 1A, s.739B–739G (investment undertakings / exit tax);
-  s.747AA–747FA (equivalent offshore funds); s.256–267 (DIRT).
+  Part 27 Chapter 1A, s.739B–739G (investment undertakings / exit tax),
+  incl. s.739D(2)(ddd) and s.739D(2A) (the 8-year event and disregard of
+  a previous one) and s.739G(3) (units in a recognised clearing system);
+  s.747AA–747FA (equivalent offshore funds), incl. s.747E(3) & (4) (no
+  loss relief; repayment/set-off of an earlier deemed-disposal charge)
+  and s.747E(6) (the 8-year deemed disposal); s.256–267 (DIRT).
 - **Finance Act 2025** — reduction of the investment-undertaking /
   exit-tax rate from 41% to 38% for chargeable events on or after
   1 January 2026 (gov.ie, *Minister Donohoe publishes Finance Bill
@@ -483,7 +566,15 @@ September 2026):
   of marketable shares and securities (S.581)* (reviewed August 2023);
   Part 19-02-05 (loss relief); Part 19-01-14a (foreign-currency
   gains/losses); Part 27-01a-02 and Part 27-04-01 (investment
-  undertakings and offshore funds); Part 08-04-01 (DIRT, ss.256–267).
+  undertakings and offshore funds — Part 27-04-01 §4.1.4 (original cost
+  and the credit cap on a disposal after a deemed disposal), §4.1.5 (the
+  8-year calculation, FIFO) and §4.1.6 (no loss relief); Part 27-01A-02
+  §4.4.5 (offset of exit tax already paid, and repayment of the excess);
+  both retrieved September 2026); Part 08-04-01 (DIRT, ss.256–267).
+- **TCA Notes for Guidance, Part 27** (Finance Act 2025 edition) —
+  s.747E(2)–(4): "Where a gain is treated as nil and tax was chargeable
+  in respect of an earlier deemed disposal of the material interest, the
+  overpaid amount is refundable/available for set-off."
 - **Revenue.ie guidance pages** — *How to calculate CGT*; *What is
   exempt from CGT?*; *What DIRT rate is applicable?*; *Funds*;
   *Restricted Stock Units (RSUs)*.

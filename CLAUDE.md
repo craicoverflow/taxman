@@ -23,9 +23,13 @@ Non-negotiables, repeated here so they are not missed:
   both are user-entered; an unset classification blocks computation by
   design.
 - **Blocked tax rules stay blocked.** s.581 (four-week loss
-  restriction) and deemed-disposal credit/refund liability fail loudly
-  on purpose — do not implement them without a cited Revenue TDM
-  source (SPEC §6).
+  restriction) fails loudly on purpose — do not implement it without a
+  cited Revenue TDM source (SPEC §6). Deemed disposal cleared that gate
+  in September 2026 (TDM Part 27-04-01 §4.1.4–4.1.6, Part 27-01A-02
+  §4.4.5, cited in `docs/maths.md` §8.1); changing its mechanics needs
+  the same treatment. Its anniversary market value is **user-entered
+  and never inferred** — a reached anniversary without one blocks that
+  holding, and must keep doing so.
 - Rates live in `internal/taxrules` as effective-dated data, never as
   constants in `engine`. Add or extend a golden fixture in any change
   that touches `taxrules` or `engine`.

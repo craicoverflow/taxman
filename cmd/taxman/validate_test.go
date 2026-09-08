@@ -116,3 +116,31 @@ func TestRunValidate_InvalidKind_ReturnsError(t *testing.T) {
 		t.Fatal("expected an error for an invalid --kind value")
 	}
 }
+
+func TestRunValidate_DeemedDisposalFirstEvent(t *testing.T) {
+	err := runValidate([]string{"--fixture", "../../testdata/golden/deemed_disposal_first_event", "--kind", "deemed", "--year", "2024"})
+	if err != nil {
+		t.Fatalf("runValidate: %v", err)
+	}
+}
+
+func TestRunValidate_DeemedDisposalCreditOnActualDisposal(t *testing.T) {
+	err := runValidate([]string{"--fixture", "../../testdata/golden/deemed_disposal_credit_on_actual_disposal", "--kind", "deemed", "--year", "2024"})
+	if err != nil {
+		t.Fatalf("runValidate: %v", err)
+	}
+}
+
+func TestRunValidate_DeemedDisposalRefundOnLaterFall(t *testing.T) {
+	err := runValidate([]string{"--fixture", "../../testdata/golden/deemed_disposal_refund_on_later_fall", "--kind", "deemed", "--year", "2024"})
+	if err != nil {
+		t.Fatalf("runValidate: %v", err)
+	}
+}
+
+func TestRunValidate_DeemedRequiresYear(t *testing.T) {
+	err := runValidate([]string{"--fixture", "../../testdata/golden/deemed_disposal_first_event", "--kind", "deemed"})
+	if err == nil {
+		t.Fatal("expected --kind deemed without --year to be rejected")
+	}
+}
