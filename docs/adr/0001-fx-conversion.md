@@ -1,6 +1,7 @@
 # ADR 0001 — Foreign-currency conversion via embedded ECB reference rates
 
-Status: accepted
+Status: accepted; the "no runtime fetch" clause is superseded by
+[ADR 0002](0002-fx-runtime-refresh.md) (2026-09-12).
 Date: 2026-09-03
 
 ## Context
@@ -28,12 +29,13 @@ contract-note rate and avoids per-platform parser work.
 offline. This is public reference data, not account data, so it does
 not fall under SPEC.md §6's "never commit real financial data" rule.
 
-**No runtime fetch.** There is deliberately no code path that downloads
-the file. Refreshing it is a manual step (re-download the ECB zip,
-replace the file), keeping the "ask first before anything
-network-capable" boundary intact. A dedicated refresh subcommand can be
-added later if the manual step proves annoying — that change would
-introduce the first network call and needs its own sign-off.
+**No runtime fetch** *(superseded — see ADR 0002)*. There is
+deliberately no code path that downloads the file. Refreshing it is a
+manual step (re-download the ECB zip, replace the file), keeping the
+"ask first before anything network-capable" boundary intact. A
+dedicated refresh subcommand can be added later if the manual step
+proves annoying — that change would introduce the first network call
+and needs its own sign-off.
 
 **Lookup semantics** (`fx.Rate(currency, date)`):
 - returns euro-per-unit (the ECB file lists units-per-euro; `fx`
