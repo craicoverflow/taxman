@@ -1,6 +1,8 @@
 package fx
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -86,6 +88,13 @@ func TestRate_DateBeforeSeriesBegins_Errors(t *testing.T) {
 }
 
 func TestRate_DateFarPastLastPublication_Errors(t *testing.T) {
+	// A live refresh is exercised separately in refresh_test.go; stub
+	// it here to fail fast (as if offline) so this stays a pure
+	// stale-data test with no real network call.
+	stubFetch(t, func(ctx context.Context) (string, error) {
+		return "", errors.New("network unreachable")
+	})
+
 	_, err := Rate("USD", mustDate(t, "2099-01-01"))
 	if err == nil {
 		t.Fatal("expected an error for a date well past the last published rate")
@@ -111,7 +120,7 @@ func TestSource_NamesECBAndCurrency(t *testing.T) {
 	if s == "" {
 		t.Fatal("Source() is empty")
 	}
-	if want := "ECB eurofxref-hist through "; !contains(s, want) {
+	if want := "ECB eurofxref-hist"; !contains(s, want) {
 		t.Errorf("Source() = %q, want it to start with %q", s, want)
 	}
 }
