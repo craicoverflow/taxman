@@ -66,3 +66,59 @@ func NewRSUVest(symbol, date, quantity, fmvPerShare, currency string) (ledger.Tr
 		Currency:   currency,
 	}, nil
 }
+
+// NewSale builds a ledger.Transaction for a single stock sale entered
+// by hand on the dashboard — for when there's no clean E*TRADE export
+// for a sale either (the same gap NewRSUVest closes on the
+// acquisition side). It produces the same shape Parse does for a
+// "Sell" row: Type sell, Price is the sale price per share, Quantity
+// the number of shares sold. The FIFO matcher in internal/engine
+// consumes it against the holding's open lots exactly as it would an
+// imported sale.
+//
+// symbol and currency must be non-empty; date must be YYYY-MM-DD;
+// quantity and pricePerShare must be positive decimal strings.
+// currency is upper-cased; a non-EUR sale is restated to euro at its
+// sale-date rate by the engine, never here.
+func NewSale(symbol, date, quantity, pricePerShare, currency string) (ledger.Transaction, error) {
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" {
+		return ledger.Transaction{}, fmt.Errorf("etrade: symbol must not be empty")
+	}
+
+	parsedDate, err := time.Parse(dateLayout, strings.TrimSpace(date))
+	if err != nil {
+		return ledger.Transaction{}, fmt.Errorf("etrade: parsing sale date %q: %w", date, err)
+	}
+
+	parsedQty, err := decimal.NewFromString(strings.TrimSpace(quantity))
+	if err != nil {
+		return ledger.Transaction{}, fmt.Errorf("etrade: parsing quantity %q: %w", quantity, err)
+	}
+	if !parsedQty.IsPositive() {
+		return ledger.Transaction{}, fmt.Errorf("etrade: quantity %q must be positive", quantity)
+	}
+
+	parsedPrice, err := decimal.NewFromString(strings.TrimSpace(pricePerShare))
+	if err != nil {
+		return ledger.Transaction{}, fmt.Errorf("etrade: parsing price per share %q: %w", pricePerShare, err)
+	}
+	if !parsedPrice.IsPositive() {
+		return ledger.Transaction{}, fmt.Errorf("etrade: price per share %q must be positive", pricePerShare)
+	}
+
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+	if currency == "" {
+		return ledger.Transaction{}, fmt.Errorf("etrade: currency must not be empty")
+	}
+
+	return ledger.Transaction{
+		Platform:   ledger.PlatformETRADE,
+		Type:       ledger.TypeSell,
+		Date:       parsedDate.UTC(),
+		Instrument: symbol,
+		Quantity:   parsedQty,
+		Price:      parsedPrice,
+		Currency:   currency,
+	}, nil
+}

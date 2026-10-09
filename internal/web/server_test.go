@@ -1759,6 +1759,159 @@ func TestHandler_RSUVest_POST_ThenClassify_ShowsUSDVestAsHolding(t *testing.T) {
 	}
 }
 
+// --- Manual stock-sale entry (POST /sale) ---
+
+func newSaleRequest(fields map[string]string) *http.Request {
+	form := url.Values{}
+	for k, v := range fields {
+		form.Set(k, v)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/sale", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req
+}
+
+func TestHandler_Sale_POST_InsertsSellTransaction(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	handler := NewServer(conn).Handler()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newSaleRequest(map[string]string{
+		"symbol": "ACME", "date": "2024-06-20", "quantity": "42", "price": "203.10", "currency": "USD",
+	}))
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusSeeOther, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/" {
+		t.Errorf("Location = %q, want /", loc)
+	}
+
+	txs, err := ledger.NewStore(conn).All()
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	if len(txs) != 1 {
+		t.Fatalf("len(txs) = %d, want 1", len(txs))
+	}
+	tx := txs[0]
+	if tx.Type != ledger.TypeSell {
+		t.Errorf("Type = %q, want %q", tx.Type, ledger.TypeSell)
+	}
+	if tx.Platform != ledger.PlatformETRADE {
+		t.Errorf("Platform = %q, want %q", tx.Platform, ledger.PlatformETRADE)
+	}
+	if tx.Instrument != "ACME" {
+		t.Errorf("Instrument = %q, want ACME", tx.Instrument)
+	}
+	if !tx.Quantity.Equal(mustDecimal(t, "42")) {
+		t.Errorf("Quantity = %s, want 42", tx.Quantity)
+	}
+	if !tx.Price.Equal(mustDecimal(t, "203.10")) {
+		t.Errorf("Price = %s, want 203.10", tx.Price)
+	}
+	if tx.Currency != "USD" {
+		t.Errorf("Currency = %q, want USD", tx.Currency)
+	}
+	if !tx.Date.Equal(mustDate(t, "2024-06-20")) {
+		t.Errorf("Date = %s, want 2024-06-20", tx.Date)
+	}
+}
+
+func TestHandler_Sale_POST_DefaultsCurrencyToUSD(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	handler := NewServer(conn).Handler()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newSaleRequest(map[string]string{
+		"symbol": "ACME", "date": "2024-06-20", "quantity": "10", "price": "100",
+	}))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusSeeOther, rec.Body.String())
+	}
+
+	txs, err := ledger.NewStore(conn).All()
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	if len(txs) != 1 || txs[0].Currency != "USD" {
+		t.Fatalf("expected one sale defaulting to USD, got %+v", txs)
+	}
+}
+
+func TestHandler_Sale_POST_InvalidField_ReturnsErrorAndWritesNothing(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	handler := NewServer(conn).Handler()
+
+	for _, bad := range []map[string]string{
+		{"symbol": "", "date": "2024-06-20", "quantity": "42", "price": "203.10"},
+		{"symbol": "ACME", "date": "nope", "quantity": "42", "price": "203.10"},
+		{"symbol": "ACME", "date": "2024-06-20", "quantity": "-1", "price": "203.10"},
+		{"symbol": "ACME", "date": "2024-06-20", "quantity": "42", "price": "0"},
+	} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, newSaleRequest(bad))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("fields %v: status = %d, want 400", bad, rec.Code)
+		}
+	}
+
+	txs, err := ledger.NewStore(conn).All()
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	if len(txs) != 0 {
+		t.Errorf("len(txs) = %d, want 0 after rejected requests", len(txs))
+	}
+}
+
+func TestHandler_Sale_GET_NotAllowed(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	rec := httptest.NewRecorder()
+	NewServer(conn).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sale", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHandler_Dashboard_ShowsSaleForm(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	body := dashboardBody(t, conn, "/")
+	for _, want := range []string{`action="/sale"`, `name="symbol"`, `name="price"`, `name="quantity"`, `name="currency"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected the dashboard to include the sale form fragment %q", want)
+		}
+	}
+}
+
+func TestHandler_Sale_POST_AfterVest_ComputesCGT(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	handler := NewServer(conn).Handler()
+
+	handler.ServeHTTP(httptest.NewRecorder(), newRSUVestRequest(map[string]string{
+		"symbol": "ACME", "date": "2024-03-15", "quantity": "42", "fmv": "100", "currency": "USD",
+	}))
+	if err := classify.NewStore(conn).Set("ACME", classify.CGTAsset); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newSaleRequest(map[string]string{
+		"symbol": "ACME", "date": "2024-06-20", "quantity": "42", "price": "203.10", "currency": "USD",
+	}))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusSeeOther, rec.Body.String())
+	}
+
+	body := dashboardBody(t, conn, "/?year=")
+	if !strings.Contains(body, "ACME") {
+		t.Errorf("expected ACME in the dashboard after sale, got: %s", body)
+	}
+	if strings.Contains(body, "converting the USD") {
+		t.Errorf("USD sale should convert cleanly, got an FX error: %s", body)
+	}
+}
+
 // --- Privacy mode (nav "Blur €" toggle) ---
 
 func TestPageShell_HasPrivacyToggleWiredToLocalStorage(t *testing.T) {

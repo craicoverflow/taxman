@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/interest/update", s.handleInterestUpdate)
 	mux.HandleFunc("/interest/delete", s.handleInterestDelete)
 	mux.HandleFunc("/rsu", s.handleRSUVest)
+	mux.HandleFunc("/sale", s.handleSale)
 	mux.HandleFunc("/portfolio", s.handlePortfolio)
 	mux.HandleFunc("/portfolio/ticker", s.handlePortfolioTicker)
 	mux.HandleFunc("/static/app.css", s.handleStaticCSS)
@@ -1017,6 +1018,52 @@ func (s *Server) handleRSUVest(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// handleSale logs a hand-entered stock sale: POST /sale with "symbol",
+// "date" (YYYY-MM-DD), "quantity", "price" (sale price per share) and
+// an optional "currency" (defaults to USD) form field. It's for when
+// there's no clean E*TRADE export for a sale either — the disposal-side
+// counterpart to handleRSUVest. It's stored as a sell transaction,
+// which internal/engine's FIFO matcher consumes against the holding's
+// open lots exactly as it would an imported sale, restated to euro at
+// the sale-date ECB rate (never here). On success it redirects to the
+// dashboard, same as handleRSUVest; a missing/invalid field is a 400
+// that writes nothing.
+func (s *Server) handleSale(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parsing form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	currency := strings.TrimSpace(r.FormValue("currency"))
+	if currency == "" {
+		currency = "USD" // the common case; E*TRADE holdings are US-listed
+	}
+	tx, err := etrade.NewSale(
+		r.FormValue("symbol"),
+		r.FormValue("date"),
+		r.FormValue("quantity"),
+		r.FormValue("price"),
+		currency,
+	)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("sale: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if _, err := s.ledgerStore.Insert(tx); err != nil {
+		http.Error(w, fmt.Sprintf("sale: inserting: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 // portfolioPosition is one currently-held instrument on the portfolio
 // page: what remains after FIFO disposals (engine.OpenPositions), the
 // market symbol mapped to it, and — when a live quote and a EUR rate
@@ -1656,6 +1703,19 @@ function addInterestRow() {
 <button type="submit">Log vest</button>
 </form>
 <p class="muted">The vest is the CGT acquisition event: cost basis is this fair market value, restated to euro at the vest-date rate. Set the holding to <code>CGT_ASSET</code> once it appears below.</p>
+</section>
+
+<section class="card">
+<h2>Log stock sale</h2>
+<form class="form-row" action="/sale" method="post">
+<label>Symbol: <input type="text" name="symbol" placeholder="ACME" required></label>
+<label>Sale date: <input type="date" name="date" required></label>
+<label>Quantity: <input type="text" name="quantity" inputmode="decimal" required></label>
+<label>Price per share: <input type="text" name="price" inputmode="decimal" placeholder="0.00" required></label>
+<label>Currency: <input type="text" name="currency" value="USD" required></label>
+<button type="submit">Log sale</button>
+</form>
+<p class="muted">The sale is matched FIFO against this holding's open lots to compute the CGT gain/loss, which appears in the liability summary below.</p>
 </section>
 
 <section class="card">

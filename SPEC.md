@@ -514,6 +514,36 @@ DIRT is DIRT. TCA 1997 s.256 charges it on deposit interest without regard to wh
 
 ---
 
+## 16. Feature: Manual stock-sale entry
+
+**Status:** built (2026-10-09). Extends §11.
+
+### Objective
+§11 added manual entry for the RSU-vest side (the CGT *acquisition*) because E*TRADE's CSV export shape was unverified. The same gap exists on the *disposal* side: there is no clean CSV for a sale either, so a sale of RSU-vested shares currently has no way into the ledger. `internal/ingest/etrade.Parse` already recognizes a `"Sell"` row and produces a `ledger.TypeSell` transaction when a matching CSV exists, but nothing builds that transaction by hand. This adds the direct-entry counterpart to §11's `NewRSUVest`, so a sale reaches the FIFO engine and shows up as a CGT figure the same way an imported one would — no new display surface, the existing dashboard liability summary and `?year=` selector already aggregate whatever `sell` transactions are in the ledger.
+
+### Shape
+- `internal/ingest/etrade` gains `NewSale(symbol, date, quantity, pricePerShare, currency string) (ledger.Transaction, error)` (`manual.go`) — same validation shape as `NewRSUVest` (symbol/currency non-empty, `date` `YYYY-MM-DD`, quantity/price positive decimals, currency upper-cased), producing `ledger.Transaction{Platform: PlatformETRADE, Type: TypeSell, Instrument: symbol, Quantity: quantity, Price: pricePerShare, Currency: currency}` — the same shape `Parse` builds for a `"Sell"` row.
+- `POST /sale` (`handleSale`) — form fields `symbol`, `date`, `quantity`, `price` (per-share sale price), and `currency` (defaults to `USD`, same rationale as `handleRSUVest`: E*TRADE holdings are US-listed). Validates via `NewSale`, inserts via `ledgerStore.Insert`, `303` to `/` on success, `400` that writes nothing on a bad field, `405` on non-POST — mirrors `handleRSUVest` exactly.
+- A "Log stock sale" card on the dashboard, next to the existing "Log RSU vest" card.
+- **No engine change.** `engine.ComputeCGT`'s FIFO matcher already consumes `sell`-type transactions against a holding's open lots regardless of how those lots or the sale entered the ledger; a non-EUR sale is restated to euro at its sale-date ECB rate by the existing `toEURPrices` path, same as a vest. The holding must already be `CGT_ASSET` (confirmed already the case for the ETRADE RSU holding in question) — an unclassified holding still blocks computation per §6, unchanged.
+
+### Out of scope
+- Any platform other than E*TRADE — one manual builder, `PlatformETRADE`, same restriction as §11.
+- Batch entry — one sale per submit, same rationale as §11 (sales are rarer than interest credits, which is why that batch grid exists).
+- A new "disposals" list/table or an audit-trail view on the dashboard — confirmed out of scope (2026-10-09 interview-me): the existing aggregated liability summary is the only display surface this feature needs. A per-disposal table stays a possible future pass, not part of this one.
+- Any fix to `internal/ingest/etrade.Parse`'s CSV column assumptions — still unverified against a real export, orthogonal to this manual path.
+
+### Testing strategy
+- `internal/ingest/etrade/manual_test.go`: table-driven tests for `NewSale` mirroring the existing `NewRSUVest` cases — valid input; empty symbol; bad date; non-positive quantity/price; currency upper-cased; currency defaulted upstream (handler concern, not the constructor's).
+- `internal/web/server_test.go`: table-driven tests for `handleSale` mirroring `handleRSUVest`'s test shape — valid entry → `303` + ledger row present with `Type: sell`; invalid date/quantity/price → `400`, nothing written; wrong method → `405`.
+- No new golden fixture or `features/*.feature` scenario required — no `engine`/`taxrules` logic changes (§5/§6 "always" boundary only triggers on those packages); a `sell` transaction already has full FIFO-matching coverage via the existing CGT golden fixtures.
+
+### Boundaries specific to this feature
+- **Always:** keep `NewSale` free of any FX/engine logic — currency restatement happens once, in `engine`, same as every other non-EUR transaction.
+- **Never:** infer or default `quantity`/`price` from anything other than what the user typed — same no-guessing rule as every other manual-entry feature.
+
+---
+
 ## Traceability
 
 | Idea doc item | Resolved here |
@@ -535,3 +565,4 @@ DIRT is DIRT. TCA 1997 s.256 charges it on deposit interest without regard to wh
 | Portfolio P&L percentage | §13, built 2026-09-06. Extends §9 — signed % of market value vs cost basis, per holding and total. |
 | Output numbers cross-checked / verifiable by an accountant | §14, built 2026-09-06. `docs/maths.md` prose reference with Irish citations + `features/*.feature` (godog) executable, engine-pinned worked examples + CI drift gate. |
 | User-named interest accounts | §15, built 2026-09-06. Supersedes §10's source registry — DIRT does not turn on which bank paid, so no bank is modelled. Migration 0007 carries existing credits across. |
+| Manual stock-sale entry | §16, built 2026-10-09. `POST /sale` + dashboard card; `etrade.NewSale` — the disposal-side counterpart to §11's manual RSU-vest entry. |

@@ -78,3 +78,72 @@ func TestNewRSUVest_SameInputsTwice_SameFingerprint(t *testing.T) {
 		t.Errorf("expected identical manual vests to fingerprint the same, got %q and %q", a.Fingerprint(), b.Fingerprint())
 	}
 }
+
+func TestNewSale_BuildsValidTransaction(t *testing.T) {
+	tx, err := NewSale("ACME", "2024-06-20", "42", "203.10", "usd")
+	if err != nil {
+		t.Fatalf("NewSale: %v", err)
+	}
+
+	if tx.Platform != ledger.PlatformETRADE {
+		t.Errorf("Platform = %q, want %q", tx.Platform, ledger.PlatformETRADE)
+	}
+	if tx.Type != ledger.TypeSell {
+		t.Errorf("Type = %q, want %q", tx.Type, ledger.TypeSell)
+	}
+	if tx.Instrument != "ACME" {
+		t.Errorf("Instrument = %q, want ACME", tx.Instrument)
+	}
+	wantDate := time.Date(2024, 6, 20, 0, 0, 0, 0, time.UTC)
+	if !tx.Date.Equal(wantDate) {
+		t.Errorf("Date = %v, want %v", tx.Date, wantDate)
+	}
+	if !tx.Quantity.Equal(decimal.RequireFromString("42")) {
+		t.Errorf("Quantity = %s, want 42", tx.Quantity)
+	}
+	// Price carries the sale price per share.
+	if !tx.Price.Equal(decimal.RequireFromString("203.10")) {
+		t.Errorf("Price (sale price/share) = %s, want 203.10", tx.Price)
+	}
+	if tx.Currency != "USD" {
+		t.Errorf("Currency = %q, want USD (upper-cased)", tx.Currency)
+	}
+}
+
+func TestNewSale_RejectsBadFields(t *testing.T) {
+	cases := []struct {
+		name                                     string
+		symbol, date, quantity, price, currency string
+	}{
+		{"empty symbol", "", "2024-06-20", "42", "203.10", "USD"},
+		{"malformed date", "ACME", "20-06-2024", "42", "203.10", "USD"},
+		{"non-numeric quantity", "ACME", "2024-06-20", "lots", "203.10", "USD"},
+		{"zero quantity", "ACME", "2024-06-20", "0", "203.10", "USD"},
+		{"negative quantity", "ACME", "2024-06-20", "-1", "203.10", "USD"},
+		{"non-numeric price", "ACME", "2024-06-20", "42", "market", "USD"},
+		{"zero price", "ACME", "2024-06-20", "42", "0", "USD"},
+		{"negative price", "ACME", "2024-06-20", "42", "-1.00", "USD"},
+		{"empty currency", "ACME", "2024-06-20", "42", "203.10", "  "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewSale(tc.symbol, tc.date, tc.quantity, tc.price, tc.currency); err == nil {
+				t.Errorf("expected an error for %s, got nil", tc.name)
+			}
+		})
+	}
+}
+
+func TestNewSale_SameInputsTwice_SameFingerprint(t *testing.T) {
+	a, err := NewSale("ACME", "2024-06-20", "42", "203.10", "USD")
+	if err != nil {
+		t.Fatalf("NewSale: %v", err)
+	}
+	b, err := NewSale("ACME", "2024-06-20", "42", "203.10", "USD")
+	if err != nil {
+		t.Fatalf("NewSale: %v", err)
+	}
+	if a.Fingerprint() != b.Fingerprint() {
+		t.Errorf("expected identical manual sales to fingerprint the same, got %q and %q", a.Fingerprint(), b.Fingerprint())
+	}
+}
