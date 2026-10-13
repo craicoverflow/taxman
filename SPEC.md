@@ -544,6 +544,18 @@ DIRT is DIRT. TCA 1997 s.256 charges it on deposit interest without regard to wh
 
 ---
 
+## 17. Feature: Merging one security held under two instrument keys
+
+**Status:** built 2026-10-13.
+
+Imports key a holding differently: Degiro and the IBKR flat/Activity layouts by ISIN, the IBKR Transaction History report by ticker (it has no ISIN column). The same fund bought through both therefore appears as two holdings, each with its own FIFO queue, classification and anniversaries. Dates are irrelevant; only the key matters.
+
+- **User-entered only.** Migration `0009` adds `instrument_aliases(alias PK, canonical, created_at)`. taxman never infers that two keys are one security (§6).
+- **Read-time resolution.** `ledger.Store.All` returns an aliased transaction under its canonical key (`LEFT JOIN`); stored rows and fingerprints are untouched, so re-importing either export stays idempotent. `classify.ListUnclassified` resolves the same way. No `engine` change: lots from both keys simply arrive under one instrument and FIFO-match oldest first.
+- **Guards** (`internal/aliases`): no self-merge, no chains (a key cannot be both an alias and a canonical), and an aliased key's recorded classification must equal the canonical's — a classified alias into an unclassified canonical is refused rather than silently dropping the user's choice.
+- **UI:** `/portfolio` gains a "Same security under two keys" card (`POST /portfolio/merge` with `alias`/`canonical`, `POST /portfolio/unmerge`). Both keys must exist in the ledger; refusals are `400`.
+- **Not for duplicates.** This is for distinct trades recorded under two keys. The same trade imported from two sources is a separate problem (fingerprints include platform and instrument) and is not handled here.
+
 ## Traceability
 
 | Idea doc item | Resolved here |

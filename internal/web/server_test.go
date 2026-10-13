@@ -2123,8 +2123,14 @@ func TestHandler_Portfolio_ShowsHeldPositionsOnly(t *testing.T) {
 	if !strings.Contains(body, "€600.00") {
 		t.Errorf("expected FIFO cost basis €600.00 (6 @ 100); got: %s", body)
 	}
-	if strings.Contains(body, "IE00B3RBWM25") {
-		t.Errorf("fully-disposed IE00B3RBWM25 should not appear; got: %s", body)
+	// The merge card deliberately lists every ledger key, sold-out ones
+	// included (a key sold under one name may be bought under another).
+	holdings := body
+	if i := strings.Index(body, "Same security under two keys"); i >= 0 {
+		holdings = body[:i]
+	}
+	if strings.Contains(holdings, "IE00B3RBWM25") {
+		t.Errorf("fully-disposed IE00B3RBWM25 should not appear in the holdings; got: %s", body)
 	}
 	if strings.Contains(body, "Rainy day") {
 		t.Errorf("the interest account should never appear on the portfolio page; got: %s", body)
@@ -2428,5 +2434,59 @@ func TestHandler_Portfolio_FXRateFailure_HoldingListedSeparately_PageStillRender
 	// VWRL is unaffected: 10 × €100 = €1,000.00 and it is the whole total.
 	if !strings.Contains(body, `Total market value: <strong><span class="money">€1,000.00</span></strong>`) {
 		t.Errorf("the EUR holding should still be valued; got: %s", body)
+	}
+}
+
+// --- Instrument merge (SPEC §17) ---
+
+func mergeRequest(path string, form url.Values) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req
+}
+
+func TestHandler_PortfolioMerge(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	ls := ledger.NewStore(conn)
+	for _, instr := range []string{"IE00B5BMR087", "SXR8"} {
+		if _, err := ls.Insert(ledger.Transaction{Platform: ledger.PlatformDegiro, Type: ledger.TypeBuy, Date: mustDate(t, "2023-01-01"), Instrument: instr, Quantity: decimal.NewFromInt(1), Price: decimal.NewFromInt(100), Currency: "EUR"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := NewServer(conn).Handler()
+
+	cases := []struct {
+		name string
+		form url.Values
+		want int
+	}{
+		{"missing", url.Values{"alias": {"SXR8"}}, http.StatusBadRequest},
+		{"unknown instrument", url.Values{"alias": {"NOPE"}, "canonical": {"SXR8"}}, http.StatusBadRequest},
+		{"self", url.Values{"alias": {"SXR8"}, "canonical": {"SXR8"}}, http.StatusBadRequest},
+		{"ok", url.Values{"alias": {"SXR8"}, "canonical": {"IE00B5BMR087"}}, http.StatusSeeOther},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, mergeRequest("/portfolio/merge", c.form))
+		if rec.Code != c.want {
+			t.Errorf("%s: status = %d, want %d", c.name, rec.Code, c.want)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/portfolio", nil))
+	if !strings.Contains(rec.Body.String(), `action="/portfolio/unmerge"`) {
+		t.Errorf("expected the merge to be listed with an Unmerge control")
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, mergeRequest("/portfolio/unmerge", url.Values{"alias": {"SXR8"}}))
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("unmerge status = %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/portfolio/merge", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET merge status = %d, want 405", rec.Code)
 	}
 }

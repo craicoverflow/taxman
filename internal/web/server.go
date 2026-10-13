@@ -18,6 +18,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"github.com/craicoverflow/taxman/internal/aliases"
 	"github.com/craicoverflow/taxman/internal/audit"
 	"github.com/craicoverflow/taxman/internal/classify"
 	"github.com/craicoverflow/taxman/internal/engine"
@@ -69,6 +70,7 @@ type Server struct {
 	classifyStore *classify.Store
 	auditStore    *audit.Store
 	tickerStore   *tickers.Store
+	aliasStore    *aliases.Store
 	valuesStore   *valuations.Store
 
 	// quoter fetches live market prices for the portfolio page; rate
@@ -89,6 +91,7 @@ func NewServer(conn *sql.DB) *Server {
 		classifyStore: classify.NewStore(conn),
 		auditStore:    audit.NewStore(conn),
 		tickerStore:   tickers.NewStore(conn),
+		aliasStore:    aliases.NewStore(conn),
 		valuesStore:   valuations.NewStore(conn),
 		quoter:        prices.NewHTTPQuoter(prices.WithCache(prices.NewSQLiteCache(conn))),
 		rate:          fx.Rate,
@@ -111,6 +114,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/sale", s.handleSale)
 	mux.HandleFunc("/portfolio", s.handlePortfolio)
 	mux.HandleFunc("/portfolio/ticker", s.handlePortfolioTicker)
+	mux.HandleFunc("/portfolio/merge", s.handlePortfolioMerge)
+	mux.HandleFunc("/portfolio/unmerge", s.handlePortfolioUnmerge)
 	mux.HandleFunc("/static/app.css", s.handleStaticCSS)
 	return mux
 }
@@ -1120,6 +1125,16 @@ type portfolioData struct {
 	AnyStale   bool
 
 	ChartDataJS template.JS
+
+	// Instruments are the keys the merge form offers; Merges are the
+	// user-entered alias → canonical entries already on record.
+	Instruments []string
+	Merges      []portfolioMerge
+}
+
+type portfolioMerge struct {
+	Alias     string
+	Canonical string
 }
 
 type portfolioPieSlice struct {
@@ -1181,6 +1196,16 @@ func (s *Server) handlePortfolio(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	var data portfolioData
+	data.Instruments = distinctInstruments(tradeTxs)
+	aliasMap, err := s.aliasStore.All()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("loading instrument merges: %v", err), http.StatusInternalServerError)
+		return
+	}
+	for alias, canonical := range aliasMap {
+		data.Merges = append(data.Merges, portfolioMerge{Alias: alias, Canonical: canonical})
+	}
+	sort.Slice(data.Merges, func(i, j int) bool { return data.Merges[i].Alias < data.Merges[j].Alias })
 	totalValue, totalCost := decimal.Zero, decimal.Zero
 	var oldestAsOf time.Time
 
@@ -1355,6 +1380,77 @@ func (s *Server) handlePortfolioTicker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	http.Redirect(w, r, "/portfolio", http.StatusSeeOther)
+}
+
+// handlePortfolioMerge records that one instrument key is the same
+// security as another: POST /portfolio/merge with "alias" and
+// "canonical". Both must already appear in the ledger; the store
+// refuses self-merges, chains and mismatched classifications (400).
+// Nothing is guessed — the user picks both keys (SPEC.md §17).
+func (s *Server) handlePortfolioMerge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parsing form: %v", err), http.StatusBadRequest)
+		return
+	}
+	alias := strings.TrimSpace(r.FormValue("alias"))
+	canonical := strings.TrimSpace(r.FormValue("canonical"))
+	if alias == "" || canonical == "" {
+		http.Error(w, "portfolio: alias and canonical are required", http.StatusBadRequest)
+		return
+	}
+
+	txs, err := s.ledgerStore.All()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("loading transactions: %v", err), http.StatusInternalServerError)
+		return
+	}
+	known := map[string]bool{}
+	for _, tx := range txs {
+		known[tx.Instrument] = true
+	}
+	if !known[alias] || !known[canonical] {
+		http.Error(w, "portfolio: both instruments must exist in the ledger", http.StatusBadRequest)
+		return
+	}
+
+	switch err := s.aliasStore.Merge(alias, canonical); {
+	case errors.Is(err, aliases.ErrSelf), errors.Is(err, aliases.ErrChain), errors.Is(err, aliases.ErrClassification):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	case err != nil:
+		http.Error(w, fmt.Sprintf("portfolio: merging %s: %v", alias, err), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/portfolio", http.StatusSeeOther)
+}
+
+// handlePortfolioUnmerge undoes a merge: POST /portfolio/unmerge with
+// "alias".
+func (s *Server) handlePortfolioUnmerge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parsing form: %v", err), http.StatusBadRequest)
+		return
+	}
+	alias := strings.TrimSpace(r.FormValue("alias"))
+	if alias == "" {
+		http.Error(w, "portfolio: alias is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.aliasStore.Unmerge(alias); err != nil {
+		http.Error(w, fmt.Sprintf("portfolio: %v", err), http.StatusInternalServerError)
+		return
+	}
 	http.Redirect(w, r, "/portfolio", http.StatusSeeOther)
 }
 
@@ -1952,6 +2048,29 @@ Total market value: <strong>{{eur .TotalValue}}</strong>
 </table>
 </section>
 {{end}}
+
+<section class="card">
+<h2>Same security under two keys</h2>
+<p>Imports key a holding by ISIN or by ticker. If two rows are one fund, merge one into the other: their lots are then matched together, oldest first. Both must be classified the same way.</p>
+{{if .Instruments}}
+<form class="form-row" action="/portfolio/merge" method="post">
+<label>Merge <select name="alias">{{range .Instruments}}<option>{{.}}</option>{{end}}</select></label>
+<label>into <select name="canonical">{{range .Instruments}}<option>{{.}}</option>{{end}}</select></label>
+<button type="submit">Merge</button>
+</form>
+{{end}}
+{{if .Merges}}
+<table class="data">
+<thead><tr><th>Merged</th><th>Read as</th><th></th></tr></thead>
+<tbody>
+{{range .Merges}}
+<tr><td>{{.Alias}}</td><td>{{.Canonical}}</td>
+<td><form action="/portfolio/unmerge" method="post"><input type="hidden" name="alias" value="{{.Alias}}"><button type="submit">Unmerge</button></form></td></tr>
+{{end}}
+</tbody>
+</table>
+{{end}}
+</section>
 
 {{if .Errored}}
 <section class="card">

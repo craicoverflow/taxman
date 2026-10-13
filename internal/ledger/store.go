@@ -231,13 +231,17 @@ func (s *Store) ManualInterestSources() ([]string, error) {
 	return out, rows.Err()
 }
 
-// All returns every stored Transaction. SourceRef is not
+// All returns every stored Transaction. An Instrument with a user-entered
+// entry in instrument_aliases is returned under its canonical key
+// (internal/aliases); the stored row, and so its fingerprint, is unchanged. SourceRef is not
 // reconstructed from storage in insertion order beyond what SQLite's
 // default row order provides; callers needing a specific order should
 // sort the result.
 func (s *Store) All() ([]Transaction, error) {
 	rows, err := s.db.Query(
-		`SELECT platform, type, date, instrument, quantity, price, currency, source_ref, description FROM transactions`,
+		`SELECT t.platform, t.type, t.date, COALESCE(a.canonical, t.instrument), t.quantity, t.price, t.currency, t.source_ref, t.description
+		 FROM transactions t
+		 LEFT JOIN instrument_aliases a ON a.alias = t.instrument`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying transactions: %w", err)

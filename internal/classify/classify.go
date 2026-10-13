@@ -82,11 +82,12 @@ func (s *Store) Set(instrument string, classification Classification) error {
 // record.
 func (s *Store) ListUnclassified() ([]string, error) {
 	rows, err := s.db.Query(`
-		SELECT DISTINCT t.instrument
+		SELECT DISTINCT COALESCE(a.canonical, t.instrument) AS instrument
 		FROM transactions t
-		LEFT JOIN holding_classifications hc ON hc.instrument = t.instrument
+		LEFT JOIN instrument_aliases a ON a.alias = t.instrument
+		LEFT JOIN holding_classifications hc ON hc.instrument = COALESCE(a.canonical, t.instrument)
 		WHERE hc.instrument IS NULL
-		ORDER BY t.instrument
+		ORDER BY instrument
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("classify: listing unclassified holdings: %w", err)
