@@ -47,8 +47,8 @@ mutually exclusive regimes, plus a blocking "don't know" state:
 
 | Classification | Applies to (typical) | Regime taxman applies |
 |---|---|---|
-| `CGT_ASSET` | Individual shares; most US-domiciled ETFs; RSU shares | **CGT** — 33%, one €1,270 annual exemption **per year across all holdings**, losses net across holdings and carry forward, FIFO lot matching |
-| `EXIT_TAX_FUND` | Irish/EU-domiciled UCITS ETFs and offshore funds in equivalent regimes | **Exit tax** — 41% (→ 38% from 1 Jan 2026), **no annual exemption**, **no loss relief per chargeable event** (a losing disposal contributes zero; it never nets against a gaining one), **8-year deemed disposal** |
+| `CGT_ASSET` | Individual shares; most US-domiciled ETFs; RSU shares | **CGT** — 31% from 2026-10-07 (33% before), one €1,270 annual exemption **per year across all holdings**, losses net across holdings and carry forward, FIFO lot matching |
+| `EXIT_TAX_FUND` | Irish/EU-domiciled UCITS ETFs and offshore funds in equivalent regimes | **Exit tax** — 41% (→ 38% from 1 Jan 2026 → 35% from 1 Jan 2027), **no annual exemption**, **no loss relief per chargeable event** (a losing disposal contributes zero; it never nets against a gaining one), **8-year deemed disposal** |
 | `UNCLASSIFIED` | Anything with no manual override on record | **None** — computation refuses to run for that holding and says so. Never defaulted to either regime. |
 
 ### What makes the ETF case genuinely different, not just a rate change
@@ -138,9 +138,9 @@ The pipeline, all in `internal/engine`, operating on immutable
 
    | Kind | Rate | Notes |
    |---|---|---|
-   | `KindCGT` | 33% from 2012-12-06; 30%/25%/22%/20% earlier | `AnnualExemption` €1,270 (constant); pre-2013 entries **UNVERIFIED** |
+   | `KindCGT` | 31% from 2026-10-07 (Budget 2027, **UNVERIFIED**); 33% from 2012-12-06; 30%/25%/22%/20% earlier | `AnnualExemption` €1,270 (constant); pre-2013 entries **UNVERIFIED** |
    | `KindDIRT` | 33% from 2020; 35→41% back through 2014; 33→20% earlier | 2014–2020 step-down held with confidence; pre-2014 **UNVERIFIED** |
-   | `KindExitTax` | 41% (2014–2025), **38% from 2026-01-01** (Finance Act 2025); 36%/33%/… earlier | pre-2013 entries **UNVERIFIED** |
+   | `KindExitTax` | 41% (2014–2025), 38% from 2026-01-01 (Finance Act 2025), **35% from 2027-01-01** (Budget 2027, **UNVERIFIED**); 36%/33%/… earlier | pre-2013 entries **UNVERIFIED** |
 
    The **UNVERIFIED** historical entries were reconstructed from memory
    so `taxman backfill` has a defensible per-year rate rather than

@@ -59,6 +59,8 @@ func TestLookup_HistoricalRates_ResolveByEventDate(t *testing.T) {
 		{KindCGT, "2012-01-01", "0.30"},
 		{KindCGT, "2012-12-06", "0.33"},
 		{KindCGT, "2024-06-01", "0.33"},
+		{KindCGT, "2026-10-06", "0.33"},
+		{KindCGT, "2026-10-07", "0.31"},
 
 		{KindDIRT, "2013-06-01", "0.33"},
 		{KindDIRT, "2014-06-01", "0.41"},
@@ -73,6 +75,8 @@ func TestLookup_HistoricalRates_ResolveByEventDate(t *testing.T) {
 		{KindExitTax, "2014-06-01", "0.41"},
 		{KindExitTax, "2025-12-31", "0.41"},
 		{KindExitTax, "2026-01-01", "0.38"},
+		{KindExitTax, "2026-12-31", "0.38"},
+		{KindExitTax, "2027-01-01", "0.35"},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.kind)+"_"+tt.date, func(t *testing.T) {

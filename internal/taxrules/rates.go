@@ -62,34 +62,45 @@ var schedules = map[Kind][]ruleVersion{
 		{effectiveFrom: effDate(2008, 10, 15), rate: cgtRate("0.22")}, // UNVERIFIED: Budget 2009 (announced 14 Oct 2008)
 		{effectiveFrom: effDate(2009, 4, 8), rate: cgtRate("0.25")},   // UNVERIFIED: Supplementary Budget 2009
 		{effectiveFrom: effDate(2011, 12, 7), rate: cgtRate("0.30")},  // UNVERIFIED: Budget 2012, disposals from 7 Dec 2011
-		{effectiveFrom: effDate(2012, 12, 6), rate: cgtRate("0.33")},  // Budget 2013, disposals from 6 Dec 2012 — current
+		{effectiveFrom: effDate(2012, 12, 6), rate: cgtRate("0.33")},  // Budget 2013, disposals from 6 Dec 2012
+		// Budget 2027 (6 Oct 2026): standard CGT rate 33% -> 31% for
+		// disposals on or after 7 Oct 2026 (not development land).
+		// UNVERIFIED against Finance Bill text / Revenue TDM — secondary sources only.
+		{effectiveFrom: effDate(2026, 10, 7), rate: cgtRate("0.31")}, // current
 	},
 	KindDIRT: {
-		{effectiveFrom: effDate(1900, 1, 1), rate: plainRate("0.20")},  // UNVERIFIED: DIRT standard rate through 2008
-		{effectiveFrom: effDate(2009, 1, 1), rate: plainRate("0.25")},  // UNVERIFIED: raised in the 2009 Budgets
-		{effectiveFrom: effDate(2011, 1, 1), rate: plainRate("0.27")},  // UNVERIFIED
-		{effectiveFrom: effDate(2012, 1, 1), rate: plainRate("0.30")},  // UNVERIFIED
-		{effectiveFrom: effDate(2013, 1, 1), rate: plainRate("0.33")},  // UNVERIFIED
-		{effectiveFrom: effDate(2014, 1, 1), rate: plainRate("0.41")},  // 2014–2016
-		{effectiveFrom: effDate(2017, 1, 1), rate: plainRate("0.39")},  // Finance Act 2016: 2%/yr step-down begins
+		{effectiveFrom: effDate(1900, 1, 1), rate: plainRate("0.20")}, // UNVERIFIED: DIRT standard rate through 2008
+		{effectiveFrom: effDate(2009, 1, 1), rate: plainRate("0.25")}, // UNVERIFIED: raised in the 2009 Budgets
+		{effectiveFrom: effDate(2011, 1, 1), rate: plainRate("0.27")}, // UNVERIFIED
+		{effectiveFrom: effDate(2012, 1, 1), rate: plainRate("0.30")}, // UNVERIFIED
+		{effectiveFrom: effDate(2013, 1, 1), rate: plainRate("0.33")}, // UNVERIFIED
+		{effectiveFrom: effDate(2014, 1, 1), rate: plainRate("0.41")}, // 2014–2016
+		{effectiveFrom: effDate(2017, 1, 1), rate: plainRate("0.39")}, // Finance Act 2016: 2%/yr step-down begins
 		{effectiveFrom: effDate(2018, 1, 1), rate: plainRate("0.37")},
 		{effectiveFrom: effDate(2019, 1, 1), rate: plainRate("0.35")},
 		{effectiveFrom: effDate(2020, 1, 1), rate: plainRate("0.33")}, // current
 	},
 	KindExitTax: {
-		{effectiveFrom: effDate(1900, 1, 1), rate: plainRate("0.23")},  // UNVERIFIED: fund exit tax, pre-2009
-		{effectiveFrom: effDate(2009, 1, 1), rate: plainRate("0.26")},  // UNVERIFIED
-		{effectiveFrom: effDate(2009, 4, 8), rate: plainRate("0.28")},  // UNVERIFIED: Supplementary Budget 2009
-		{effectiveFrom: effDate(2011, 1, 1), rate: plainRate("0.30")},  // UNVERIFIED
-		{effectiveFrom: effDate(2012, 1, 1), rate: plainRate("0.33")},  // UNVERIFIED
-		{effectiveFrom: effDate(2013, 1, 1), rate: plainRate("0.36")},  // Finance Act 2012
-		{effectiveFrom: effDate(2014, 1, 1), rate: plainRate("0.41")},  // Finance Act 2013 — pre-2026 rate
+		{effectiveFrom: effDate(1900, 1, 1), rate: plainRate("0.23")}, // UNVERIFIED: fund exit tax, pre-2009
+		{effectiveFrom: effDate(2009, 1, 1), rate: plainRate("0.26")}, // UNVERIFIED
+		{effectiveFrom: effDate(2009, 4, 8), rate: plainRate("0.28")}, // UNVERIFIED: Supplementary Budget 2009
+		{effectiveFrom: effDate(2011, 1, 1), rate: plainRate("0.30")}, // UNVERIFIED
+		{effectiveFrom: effDate(2012, 1, 1), rate: plainRate("0.33")}, // UNVERIFIED
+		{effectiveFrom: effDate(2013, 1, 1), rate: plainRate("0.36")}, // Finance Act 2012
+		{effectiveFrom: effDate(2014, 1, 1), rate: plainRate("0.41")}, // Finance Act 2013 — pre-2026 rate
 		{
 			// Finance Act 2025: exit tax cut from 41% to 38% for
 			// chargeable events (including deemed disposals) on or
 			// after 1 January 2026.
 			effectiveFrom: effDate(2026, 1, 1),
 			rate:          plainRate("0.38"),
+		},
+		{
+			// Budget 2027 (6 Oct 2026): exit tax 38% -> 35% from
+			// 1 January 2027. UNVERIFIED against Finance Bill text
+			// — secondary sources only; confirm once enacted.
+			effectiveFrom: effDate(2027, 1, 1),
+			rate:          plainRate("0.35"),
 		},
 	},
 }
