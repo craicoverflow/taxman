@@ -41,6 +41,32 @@ var flatHeader = []string{
 	"NetCash", "FXRateToBase",
 }
 
+// historyHeader is the column layout of the "Transaction History"
+// section in IBKR's Transaction History report (Reports > Transaction
+// History). It opens with the same Statement/Header row as an Activity
+// Statement, so Detect cannot tell them apart; Parse finds the section
+// instead. Matched against a real export. Notably there is NO ISIN: the
+// ticker Symbol is the only identifier, and the "Gross Amount" header
+// carries a trailing space in the real file (headers are trimmed).
+var historyHeader = []string{
+	"Transaction History", "Header", "Date", "Account", "Description",
+	"Transaction Type", "Symbol", "Quantity", "Price", "Price Currency",
+	"Gross Amount", "Commission", "Net Amount",
+}
+
+// historyTradeTypes maps the Transaction Type column to a ledger type.
+// historySkipTypes are known cash / non-security rows, skipped with a
+// warning. Any other type is an explicit error, never a silent skip.
+var (
+	historyTradeTypes = map[string]ledger.Type{"Buy": ledger.TypeBuy, "Sell": ledger.TypeSell}
+	historySkipTypes  = map[string]bool{
+		"Forex Trade Component": true,
+		"Adjustment":            true,
+		"Deposit":               true,
+		"Withdrawal":            true,
+	}
+)
+
 const (
 	dateLayout     = "2006-01-02" // Activity Statement Date/Time column
 	flatDateLayout = "20060102"   // flat export TradeDate column
@@ -60,6 +86,19 @@ const (
 	colQuantity
 	colPrice
 	colISIN
+)
+
+// column indices into a Transaction History data row (same shape as
+// historyHeader).
+const (
+	histColDate = iota + 2
+	histColAccount
+	histColDescription
+	histColType
+	histColSymbol
+	histColQuantity
+	histColPrice
+	histColPriceCurrency
 )
 
 // column indices into a flat-export row (same shape as flatHeader).
@@ -120,7 +159,132 @@ func Parse(r io.Reader) ([]ledger.Transaction, []string, error) {
 	if headerMatches(records[0], flatHeader) {
 		return parseFlat(records[1:])
 	}
+	if hasHistorySection(records) {
+		return parseTransactionHistory(records)
+	}
 	return parseActivityStatement(records)
+}
+
+func hasHistorySection(records [][]string) bool {
+	for _, r := range records {
+		if len(r) >= 2 && r[0] == "Transaction History" && r[1] == "Header" {
+			return true
+		}
+	}
+	return false
+}
+
+// parseTransactionHistory handles the Transaction History report: one
+// ledger.Transaction per Buy/Sell row in the "Transaction History"
+// section. Prices stay in their native Price Currency so the engine
+// restates them at the ECB reference rate for the trade date (ADR 0001).
+// The Symbol is the Instrument, as for eTrade — the export carries no
+// ISIN, and taxman does not guess one. Commission is not modelled,
+// consistent with every other parser.
+func parseTransactionHistory(records [][]string) ([]ledger.Transaction, []string, error) {
+	var out []ledger.Transaction
+	skipped := 0
+	sawHeader := false
+
+	for i, record := range records {
+		rowNum := i + 1
+		if len(record) == 0 || record[0] != "Transaction History" {
+			continue
+		}
+		if len(record) >= 2 && record[1] == "Header" {
+			if !trimmedMatches(record, historyHeader) {
+				return nil, nil, fmt.Errorf("ibkr: row %d: unrecognized Transaction History header: %v", rowNum, record)
+			}
+			sawHeader = true
+			continue
+		}
+		if len(record) < 2 || record[1] != "Data" {
+			continue
+		}
+		if !sawHeader {
+			return nil, nil, fmt.Errorf("ibkr: row %d: Transaction History data row appeared before its header", rowNum)
+		}
+		if len(record) != len(historyHeader) {
+			return nil, nil, fmt.Errorf("ibkr: row %d: expected %d columns, got %d", rowNum, len(historyHeader), len(record))
+		}
+
+		kind := strings.TrimSpace(record[histColType])
+		txType, isTrade := historyTradeTypes[kind]
+		if !isTrade {
+			if !historySkipTypes[kind] {
+				return nil, nil, fmt.Errorf("ibkr: row %d: unrecognized transaction type %q", rowNum, kind)
+			}
+			skipped++
+			continue
+		}
+
+		tx, err := parseHistoryRow(record, txType)
+		if err != nil {
+			return nil, nil, fmt.Errorf("ibkr: row %d: %w", rowNum, err)
+		}
+		out = append(out, tx)
+	}
+
+	var warnings []string
+	if skipped > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"ibkr: skipped %d cash row(s) (forex legs, adjustments, deposits/withdrawals — not securities trades)", skipped))
+	}
+	return out, warnings, nil
+}
+
+func trimmedMatches(header, want []string) bool {
+	if len(header) != len(want) {
+		return false
+	}
+	for i, w := range want {
+		if strings.TrimSpace(header[i]) != w {
+			return false
+		}
+	}
+	return true
+}
+
+func parseHistoryRow(record []string, txType ledger.Type) (ledger.Transaction, error) {
+	date, err := time.Parse(dateLayout, strings.TrimSpace(record[histColDate]))
+	if err != nil {
+		return ledger.Transaction{}, fmt.Errorf("parsing date %q: %w", record[histColDate], err)
+	}
+
+	symbol := strings.TrimSpace(record[histColSymbol])
+	if symbol == "" || symbol == "-" {
+		return ledger.Transaction{}, fmt.Errorf("empty symbol")
+	}
+
+	quantity, err := decimal.NewFromString(strings.TrimSpace(record[histColQuantity]))
+	if err != nil {
+		return ledger.Transaction{}, fmt.Errorf("parsing quantity %q: %w", record[histColQuantity], err)
+	}
+	if quantity.IsZero() {
+		return ledger.Transaction{}, fmt.Errorf("zero quantity")
+	}
+
+	price, err := decimal.NewFromString(strings.TrimSpace(record[histColPrice]))
+	if err != nil {
+		return ledger.Transaction{}, fmt.Errorf("parsing price %q: %w", record[histColPrice], err)
+	}
+
+	currency := strings.TrimSpace(record[histColPriceCurrency])
+	if currency == "" || currency == "-" {
+		return ledger.Transaction{}, fmt.Errorf("empty price currency")
+	}
+
+	return ledger.Transaction{
+		Platform:    ledger.PlatformIBKR,
+		Type:        txType,
+		Date:        date.UTC(),
+		Instrument:  symbol,
+		Quantity:    quantity.Abs(),
+		Price:       price.Abs(),
+		Currency:    currency,
+		SourceRef:   "", // the report carries no per-fill order ID
+		Description: strings.TrimSpace(record[histColDescription]),
+	}, nil
 }
 
 // parseFlat handles the flat trades export (rows after the header).

@@ -275,3 +275,86 @@ func TestDetect_RecognizesFlatHeader(t *testing.T) {
 		t.Error("expected Detect to recognize the flat trades export header")
 	}
 }
+
+// IBKR's "Transaction History" report shares the Activity Statement's
+// first row but carries its trades in a "Transaction History" section
+// keyed by ticker (no ISIN) with a Price Currency column. Cash legs
+// (Forex Trade Component, Adjustment, Deposit) sit alongside the trades.
+const sampleTransactionHistory = `Statement,Header,Field Name,Field Value
+Statement,Data,Title,Transaction History
+Summary,Header,Field Name,Field Value
+Summary,Data,Base Currency,EUR
+Transaction History,Header,Date,Account,Description,Transaction Type,Symbol,Quantity,Price,Price Currency,Gross Amount ,Commission,Net Amount
+Transaction History,Data,2025-01-10,U***00000,FIXTURE EUR FUND,Buy,FIXA,5.0,100.5,EUR,-502.5,-3.0,-505.5
+Transaction History,Data,2025-01-10,U***00000,FIXTURE US STOCK,Buy,FIXB,2.0,50.25,USD,-90.0,-0.9,-90.9
+Transaction History,Data,2025-01-10,U***00000,Net Amount in Base from Forex Trade: -90.9 EUR.USD,Forex Trade Component,EUR.USD,-90.9,1.1,USD,0.5,-,0.5
+Transaction History,Data,2025-01-11,U***00000,FIXTURE US STOCK,Sell,FIXB,-1.0,60.0,USD,54.0,-0.9,53.1
+Transaction History,Data,2025-01-11,U***00000,FX Translations P&L,Adjustment,-,-,-,-,0.08,-,0.08
+Transaction History,Data,2025-01-09,U***00000,Electronic Fund Transfer,Deposit,-,-,-,-,1000.0,-,1000.0
+`
+
+func TestParse_TransactionHistory_ImportsTradesSkipsCashRowsWithWarning(t *testing.T) {
+	txs, warnings, err := Parse(strings.NewReader(sampleTransactionHistory))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(txs) != 3 {
+		t.Fatalf("expected 3 trades (2 buys + 1 sell), got %d", len(txs))
+	}
+	if len(warnings) == 0 || !strings.Contains(warnings[0], "skipped 3") {
+		t.Errorf("expected a warning about 3 skipped cash rows, got %v", warnings)
+	}
+}
+
+func TestParse_TransactionHistory_KeepsNativeCurrencyAndTickerInstrument(t *testing.T) {
+	txs, _, err := Parse(strings.NewReader(sampleTransactionHistory))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	eur, usd := txs[0], txs[1]
+	if eur.Instrument != "FIXA" || eur.Currency != "EUR" {
+		t.Errorf("EUR buy = %q/%q, want FIXA/EUR", eur.Instrument, eur.Currency)
+	}
+	if usd.Instrument != "FIXB" || usd.Currency != "USD" {
+		t.Errorf("USD buy = %q/%q, want FIXB/USD (native; engine converts at ECB rate)", usd.Instrument, usd.Currency)
+	}
+	if !usd.Price.Equal(decimal.RequireFromString("50.25")) {
+		t.Errorf("USD price = %s, want native 50.25", usd.Price)
+	}
+	if usd.Type != ledger.TypeBuy || !usd.Quantity.Equal(decimal.NewFromInt(2)) {
+		t.Errorf("USD buy type/qty = %q/%s, want buy/2", usd.Type, usd.Quantity)
+	}
+	if usd.Platform != ledger.PlatformIBKR {
+		t.Errorf("Platform = %q, want ibkr", usd.Platform)
+	}
+	wantDate := time.Date(2025, 1, 10, 0, 0, 0, 0, time.UTC)
+	if !usd.Date.Equal(wantDate) {
+		t.Errorf("Date = %v, want %v", usd.Date, wantDate)
+	}
+}
+
+func TestParse_TransactionHistory_SellHasPositiveQuantity(t *testing.T) {
+	txs, _, err := Parse(strings.NewReader(sampleTransactionHistory))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	sell := txs[2]
+	if sell.Type != ledger.TypeSell || !sell.Quantity.Equal(decimal.NewFromInt(1)) {
+		t.Errorf("sell type/qty = %q/%s, want sell/1", sell.Type, sell.Quantity)
+	}
+}
+
+func TestParse_TransactionHistory_UnknownTransactionType_ReturnsExplicitError(t *testing.T) {
+	in := strings.Replace(sampleTransactionHistory, ",Deposit,", ",Mystery,", 1)
+	if _, _, err := Parse(strings.NewReader(in)); err == nil || !strings.Contains(err.Error(), "Mystery") {
+		t.Fatalf("expected an error naming the unrecognized type, got %v", err)
+	}
+}
+
+func TestParse_TransactionHistory_MalformedTradeRow_ReturnsExplicitError(t *testing.T) {
+	in := strings.Replace(sampleTransactionHistory, ",5.0,100.5,", ",five,100.5,", 1)
+	if _, _, err := Parse(strings.NewReader(in)); err == nil {
+		t.Fatal("expected an error for a non-numeric quantity")
+	}
+}

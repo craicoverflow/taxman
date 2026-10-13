@@ -1,0 +1,12 @@
+Statement,Header,Field Name,Field Value
+Statement,Data,Title,Transaction History
+Statement,Data,Period,"January 6, 2025 - January 12, 2025"
+Summary,Header,Field Name,Field Value
+Summary,Data,Base Currency,EUR
+Transaction History,Header,Date,Account,Description,Transaction Type,Symbol,Quantity,Price,Price Currency,Gross Amount ,Commission,Net Amount
+Transaction History,Data,2025-01-10,U***00000,FIXTURE EUR FUND,Buy,FIXA,5.0,100.5,EUR,-502.5,-3.0,-505.5
+Transaction History,Data,2025-01-10,U***00000,FIXTURE US STOCK,Buy,FIXB,2.0,50.25,USD,-90.0,-0.9,-90.9
+Transaction History,Data,2025-01-10,U***00000,Net Amount in Base from Forex Trade: -90.9 EUR.USD,Forex Trade Component,EUR.USD,-90.9,1.1,USD,0.5,-,0.5
+Transaction History,Data,2025-01-11,U***00000,FIXTURE US STOCK,Sell,FIXB,-1.0,60.0,USD,54.0,-0.9,53.1
+Transaction History,Data,2025-01-11,U***00000,FX Translations P&L,Adjustment,-,-,-,-,0.08,-,0.08
+Transaction History,Data,2025-01-09,U***00000,Electronic Fund Transfer,Deposit,-,-,-,-,1000.0,-,1000.0
