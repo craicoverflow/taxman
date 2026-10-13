@@ -19,6 +19,7 @@ import (
 	"github.com/shopspring/decimal"
 	_ "modernc.org/sqlite"
 
+	"github.com/craicoverflow/taxman/internal/aliases"
 	"github.com/craicoverflow/taxman/internal/audit"
 	"github.com/craicoverflow/taxman/internal/classify"
 	"github.com/craicoverflow/taxman/internal/db"
@@ -2488,5 +2489,55 @@ func TestHandler_PortfolioMerge(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/portfolio/merge", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET merge status = %d, want 405", rec.Code)
+	}
+}
+
+func TestHandler_PortfolioTicker_SameSymbolMergesHoldings(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	ls := ledger.NewStore(conn)
+	for _, instr := range []string{"IE00B5BMR087", "SXR8"} {
+		if _, err := ls.Insert(ledger.Transaction{Platform: ledger.PlatformDegiro, Type: ledger.TypeBuy, Date: mustDate(t, "2023-01-01"), Instrument: instr, Quantity: decimal.NewFromInt(1), Price: decimal.NewFromInt(100), Currency: "EUR"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := NewServer(conn).Handler()
+
+	for _, req := range []*http.Request{newTickerRequest("IE00B5BMR087", "SXR8.DE"), newTickerRequest("SXR8", "sxr8.de")} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	got, err := aliases.NewStore(conn).All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The holding that already carried the symbol stays canonical.
+	if got["SXR8"] != "IE00B5BMR087" || len(got) != 1 {
+		t.Errorf("aliases = %v, want SXR8 → IE00B5BMR087", got)
+	}
+}
+
+func TestHandler_PortfolioTicker_SameSymbolDifferentClassification_SavesSymbolRefusesMerge(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	cs := classify.NewStore(conn)
+	_ = cs.Set("A", classify.CGTAsset)
+	_ = cs.Set("B", classify.ExitTaxFund)
+	handler := NewServer(conn).Handler()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newTickerRequest("A", "X.DE"))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, newTickerRequest("B", "X.DE"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if sym, ok, _ := tickers.NewStore(conn).Get("B"); !ok || sym != "X.DE" {
+		t.Errorf("symbol should still be saved, got %q %v", sym, ok)
+	}
+	if got, _ := aliases.NewStore(conn).All(); len(got) != 0 {
+		t.Errorf("no merge expected, got %v", got)
 	}
 }

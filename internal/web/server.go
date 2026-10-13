@@ -1380,7 +1380,69 @@ func (s *Server) handlePortfolioTicker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	switch err := s.mergeBySymbol(instrument, symbol); {
+	case errors.Is(err, aliases.ErrChain), errors.Is(err, aliases.ErrClassification):
+		http.Error(w, fmt.Sprintf("portfolio: symbol saved, but %s was not merged with the other holding mapped to %s: %v", instrument, symbol, err), http.StatusBadRequest)
+		return
+	case err != nil:
+		http.Error(w, fmt.Sprintf("portfolio: merging %s: %v", instrument, err), http.StatusInternalServerError)
+		return
+	}
+
 	http.Redirect(w, r, "/portfolio", http.StatusSeeOther)
+}
+
+// mergeBySymbol merges instrument into any other holding the user has
+// mapped to the same market symbol (SXR8.DE for both an ISIN-keyed and
+// a ticker-keyed import of one fund). The symbols are user-entered, so
+// this is the user's own statement that the two are one security, not
+// an inference; it is recorded as an ordinary, reversible alias entry
+// with the same guards (SPEC.md §17). The holding that already carried
+// the symbol is kept as the canonical key, unless the newly mapped one
+// already has merges of its own.
+func (s *Server) mergeBySymbol(instrument, symbol string) error {
+	mappings, err := s.tickerStore.All()
+	if err != nil {
+		return err
+	}
+	aliasMap, err := s.aliasStore.All()
+	if err != nil {
+		return err
+	}
+	resolve := func(k string) string {
+		if c, ok := aliasMap[k]; ok {
+			return c
+		}
+		return k
+	}
+	hasAliases := func(k string) bool {
+		for _, c := range aliasMap {
+			if c == k {
+				return true
+			}
+		}
+		return false
+	}
+
+	mine := resolve(instrument)
+	for other, sym := range mappings {
+		if other == instrument || !strings.EqualFold(sym, symbol) {
+			continue
+		}
+		theirs := resolve(other)
+		if theirs == mine {
+			continue
+		}
+		from, into := mine, theirs
+		if hasAliases(mine) && !hasAliases(theirs) {
+			from, into = theirs, mine
+		}
+		if err := s.aliasStore.Merge(from, into); err != nil {
+			return err
+		}
+		return nil
+	}
+	return nil
 }
 
 // handlePortfolioMerge records that one instrument key is the same
@@ -2051,7 +2113,7 @@ Total market value: <strong>{{eur .TotalValue}}</strong>
 
 <section class="card">
 <h2>Same security under two keys</h2>
-<p>Imports key a holding by ISIN or by ticker. If two rows are one fund, merge one into the other: their lots are then matched together, oldest first. Both must be classified the same way.</p>
+<p>Imports key a holding by ISIN or by ticker. If two rows are one fund, give them the same symbol (they merge automatically) or merge one into the other here: their lots are then matched together, oldest first. Both must be classified the same way.</p>
 {{if .Instruments}}
 <form class="form-row" action="/portfolio/merge" method="post">
 <label>Merge <select name="alias">{{range .Instruments}}<option>{{.}}</option>{{end}}</select></label>
