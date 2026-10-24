@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# pre-push: when a tag is being pushed, build it and push the image to the
+# homelab registry (make docker-push) before the tag goes to the remote.
+#
+# - Builds the tagged commit in a temporary worktree, not your working tree.
+# - Skips (never blocks) if the LAN registry is unreachable or the tag
+#   predates the docker-push target.
+# - A failed build aborts the push.
+# - Bypass: SKIP_DOCKER_PUSH=1 git push ...   (or git push --no-verify)
+# Enable with: git config core.hooksPath .githooks
+set -euo pipefail
+
+[ "${SKIP_DOCKER_PUSH:-}" = 1 ] && exit 0
+
+registry="${REGISTRY:-192.168.50.67:5000}"
+zero=0000000000000000000000000000000000000000
+tmp=""
+cleanup() {
+  if [ -n "$tmp" ]; then
+    git worktree remove --force "$tmp" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+  case "$local_ref" in refs/tags/*) ;; *) continue ;; esac
+  [ "$local_sha" = "$zero" ] && continue # tag deletion
+
+  tag="${local_ref#refs/tags/}"
+  commit=$(git rev-parse "$local_sha^{commit}")
+
+  if ! curl -sf -m 3 "http://$registry/v2/" >/dev/null; then
+    echo "pre-push: registry $registry unreachable, skipping image build for $tag" >&2
+    continue
+  fi
+
+  tmp=$(mktemp -d)
+  git worktree add --detach "$tmp" "$commit" >/dev/null 2>&1
+  if ! make -C "$tmp" -n docker-push >/dev/null 2>&1; then
+    echo "pre-push: $tag has no docker-push target, skipping image build" >&2
+    cleanup; tmp=""
+    continue
+  fi
+
+  echo "pre-push: building and pushing $registry image for tag $tag" >&2
+  # Redirect make's stdout: git sends hook stdout to the terminal anyway, but
+  # keep it on stderr so it never mixes with git's own protocol output.
+  make -C "$tmp" docker-push TAG="$tag" 1>&2 ||
+    { echo "pre-push: image build failed for $tag, aborting push" >&2; exit 1; }
+  cleanup; tmp=""
+done
