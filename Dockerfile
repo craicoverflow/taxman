@@ -3,7 +3,12 @@
 # ---- build -----------------------------------------------------------------
 # modernc.org/sqlite is pure Go, so the binary builds with CGO disabled and
 # needs no C toolchain or shared libraries at runtime.
-FROM golang:1.25-alpine AS build
+# The build stage runs on the host architecture and cross-compiles, so an
+# amd64 image built on an arm64 machine does not run the Go toolchain
+# under QEMU emulation (which segfaults).
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /src
 
@@ -13,7 +18,7 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/taxman ./cmd/taxman
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w" -o /out/taxman ./cmd/taxman
 
 # ---- runtime -------------------------------------------------------------
 FROM alpine:3.20

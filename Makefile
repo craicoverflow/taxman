@@ -1,4 +1,4 @@
-.PHONY: build test lint fuzz bdd regen-features docs check-features check-docs ci dev demo docker-build deploy
+.PHONY: build test lint fuzz bdd regen-features docs check-features check-docs ci dev demo docker-build docker-push deploy
 
 # Load a local .env (gitignored) if present and export its vars to
 # every recipe, so `make dev` picks up e.g. TAXMAN_FINNHUB_TOKEN for
@@ -110,6 +110,22 @@ dev:
 # before pushing.
 docker-build:
 	docker build -t taxman:local .
+
+# docker-push builds a linux/amd64 image (the homelab is x86_64) and pushes
+# it to the homelab registry as :<git describe> and :latest. Defaults to the
+# LAN registry (plain HTTP, no auth; needs it in the daemon's
+# insecure-registries). Over Tailscale instead:
+#   make docker-push REGISTRY=registry.phelanenda.com   (after docker login)
+REGISTRY ?= 192.168.50.67:5000
+IMAGE    ?= $(REGISTRY)/taxman
+TAG      ?= $(shell git describe --tags --always --dirty)
+PLATFORM ?= linux/amd64
+
+docker-push:
+	docker buildx build --platform $(PLATFORM) \
+		--build-arg VERSION=$(TAG) \
+		-t $(IMAGE):$(TAG) -t $(IMAGE):latest \
+		--push .
 
 # deploy syncs committed changes to the homelab and rebuilds the
 # container in place (git pull + docker compose up -d --build). Override
