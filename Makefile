@@ -112,7 +112,8 @@ docker-build:
 	docker build -t taxman:local .
 
 # docker-push builds a linux/amd64 image (the homelab is x86_64) and pushes
-# it to the homelab registry as :<git describe> and :latest. Defaults to the
+# it to the homelab registry as :<git describe>, plus :latest for stable
+# semver tags only (see LATEST_TAG below). Defaults to the
 # LAN registry (plain HTTP, no auth; needs it in the daemon's
 # insecure-registries). Over Tailscale instead:
 #   make docker-push REGISTRY=registry.phelanenda.com   (after docker login)
@@ -121,10 +122,16 @@ IMAGE    ?= $(REGISTRY)/taxman
 TAG      ?= $(shell git describe --tags --always --dirty)
 PLATFORM ?= linux/amd64
 
+# :latest only tracks stable releases: TAG must be plain semver (1.2.3 or
+# v1.2.3). Anything with a suffix — -rc.1, -4-gabc1234 (commits past a
+# tag), -dirty — or a bare commit hash is pushed under its own tag only.
+STABLE_RE := ^v?[0-9]+\.[0-9]+\.[0-9]+$$
+LATEST_TAG = $(if $(shell printf '%s' '$(TAG)' | grep -E '$(STABLE_RE)'),-t $(IMAGE):latest)
+
 docker-push:
 	docker buildx build --platform $(PLATFORM) \
 		--build-arg VERSION=$(TAG) \
-		-t $(IMAGE):$(TAG) -t $(IMAGE):latest \
+		-t $(IMAGE):$(TAG) $(LATEST_TAG) \
 		--push .
 
 # deploy syncs committed changes to the homelab and rebuilds the
