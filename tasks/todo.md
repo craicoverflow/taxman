@@ -78,6 +78,6 @@ SPEC.md §18 (to be written in 12.0), `docs/ideas/single-trade-entry.md`. No eng
 - [x] 12.3 Batch grid (all-or-nothing, mirrors `/interest`)
 - [x] **CHECKPOINT 9** — core entry path; review before lifecycle/import work
 - [x] 12.4 List, edit, delete manual trades (oversell guard on edit/delete)
-- [ ] 12.5 Import near-match warning (ignores price; warn only)
+- [x] 12.5 Import near-match warning (ignores price; warn only)
 - [ ] 12.6 Retire "Log stock sale" card (confirmed; keep `/sale` handler)
 - [ ] **CHECKPOINT 10** — Phase 12 complete; review
