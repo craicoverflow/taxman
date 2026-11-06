@@ -98,39 +98,46 @@ func CheckNoOversell(existing, added []ledger.Transaction) error {
 	for _, tx := range added {
 		touched[tx.Instrument] = true
 	}
-
-	byInstrument := map[string][]ledger.Transaction{}
-	for _, tx := range existing {
-		if touched[tx.Instrument] {
-			byInstrument[tx.Instrument] = append(byInstrument[tx.Instrument], tx)
-		}
-	}
-	for _, tx := range added {
-		byInstrument[tx.Instrument] = append(byInstrument[tx.Instrument], tx)
-	}
-
-	// Check instruments in a fixed order so the error is deterministic.
-	instruments := make([]string, 0, len(byInstrument))
-	for k := range byInstrument {
+	instruments := make([]string, 0, len(touched))
+	for k := range touched {
 		instruments = append(instruments, k)
 	}
-	sort.Strings(instruments)
+	sort.Strings(instruments) // a fixed order keeps the error deterministic
 
+	all := make([]ledger.Transaction, 0, len(existing)+len(added))
+	all = append(all, existing...)
+	all = append(all, added...)
 	for _, instrument := range instruments {
-		txs := byInstrument[instrument]
-		sort.SliceStable(txs, func(i, j int) bool { return txs[i].Date.Before(txs[j].Date) })
+		if err := CheckHolding(all, instrument); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-		held := decimal.Zero
-		for _, tx := range txs {
-			switch tx.Type {
-			case ledger.TypeBuy, ledger.TypeRSUVest:
-				held = held.Add(tx.Quantity)
-			case ledger.TypeSell:
-				held = held.Sub(tx.Quantity)
-				if held.IsNegative() {
-					return fmt.Errorf("manualtrade: sell of %s %s on %s exceeds the quantity held by %s",
-						tx.Quantity, instrument, tx.Date.Format(dateLayout), held.Neg())
-				}
+// CheckHolding reports an error if any sell of instrument in txs
+// exceeds the quantity held at its date. Other instruments in txs are
+// ignored. It is what a delete or an edit needs: after removing or
+// replacing a row, does the holding still balance?
+func CheckHolding(txs []ledger.Transaction, instrument string) error {
+	var mine []ledger.Transaction
+	for _, tx := range txs {
+		if tx.Instrument == instrument {
+			mine = append(mine, tx)
+		}
+	}
+	sort.SliceStable(mine, func(i, j int) bool { return mine[i].Date.Before(mine[j].Date) })
+
+	held := decimal.Zero
+	for _, tx := range mine {
+		switch tx.Type {
+		case ledger.TypeBuy, ledger.TypeRSUVest:
+			held = held.Add(tx.Quantity)
+		case ledger.TypeSell:
+			held = held.Sub(tx.Quantity)
+			if held.IsNegative() {
+				return fmt.Errorf("manualtrade: sell of %s %s on %s exceeds the quantity held by %s",
+					tx.Quantity, instrument, tx.Date.Format(dateLayout), held.Neg())
 			}
 		}
 	}

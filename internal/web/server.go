@@ -113,9 +113,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/interest/delete", s.handleInterestDelete)
 	mux.HandleFunc("/rsu", s.handleRSUVest)
 	mux.HandleFunc("/sale", s.handleSale)
-	mux.HandleFunc("/portfolio", s.handlePortfolio)
 	mux.HandleFunc("/trade", s.handleTrade)
 	mux.HandleFunc("/portfolio/ticker", s.handlePortfolioTicker)
+	mux.HandleFunc("/trade/update", s.handleTradeUpdate)
+	mux.HandleFunc("/trade/delete", s.handleTradeDelete)
+	mux.HandleFunc("/portfolio", s.handlePortfolio)
 	mux.HandleFunc("/portfolio/merge", s.handlePortfolioMerge)
 	mux.HandleFunc("/portfolio/unmerge", s.handlePortfolioUnmerge)
 	mux.HandleFunc("/static/app.css", s.handleStaticCSS)
@@ -564,6 +566,22 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	chartJS, err := chartDataJS(summary, disposals)
+	// The hand-entered trades, each with its row id so a mistake can be
+	// corrected or removed. Not year-scoped, like the interest credits.
+	storedTrades, err := s.ledgerStore.ManualTrades()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("loading manual trades: %v", err), http.StatusInternalServerError)
+		return
+	}
+	manualTradeRows := make([]manualTradeRow, 0, len(storedTrades))
+	for _, tr := range storedTrades {
+		manualTradeRows = append(manualTradeRows, manualTradeRow{
+			ID: tr.ID, Kind: string(tr.Type), Instrument: tr.Instrument,
+			Date: tr.Date.Format("2006-01-02"), Quantity: tr.Quantity.String(),
+			Price: tr.Price.String(), Currency: tr.Currency,
+		})
+	}
+
 	if err != nil {
 		http.Error(w, fmt.Sprintf("building chart data: %v", err), http.StatusInternalServerError)
 		return
@@ -604,10 +622,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		InterestCredits:   interestCredits,
 		InterestSources:   interestSources,
 		InterestBatchRows: make([]struct{}, interestBatchRows),
-		ChartDataJS:       chartJS,
 		TradeHoldings:     tradeHoldings(txs),
 		TradeBatchRows:    make([]struct{}, tradeBatchRows),
 		Years:             years,
+		ManualTrades:      manualTradeRows,
+		ChartDataJS:       chartJS,
 		SelectedYear:      selectedYear,
 	}); err != nil {
 		http.Error(w, fmt.Sprintf("rendering dashboard: %v", err), http.StatusInternalServerError)
@@ -1073,7 +1092,6 @@ func (s *Server) handleSale(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// portfolioPosition is one currently-held instrument on the portfolio
 // tradeHolding is one option in the "Log trade" card's holding picker:
 // an instrument that already has buys, sells or vests in the ledger.
 type tradeHolding struct {
@@ -1269,6 +1287,183 @@ func (s *Server) handleTrade(w http.ResponseWriter, r *http.Request) {
 }
 
 // page: what remains after FIFO disposals (engine.OpenPositions), the
+// manualTradeRow is one hand-entered trade in the dashboard's "Manual
+// trades logged" list, with its row id for the edit and delete forms.
+type manualTradeRow struct {
+	ID         int64
+	Kind       string // "buy" or "sell"
+	Instrument string
+	Date       string
+	Quantity   string
+	Price      string
+	Currency   string
+}
+
+// withoutTrade returns txs minus one transaction equal to old, with
+// old's instrument taken as canonical (txs come from ledger.Store.All,
+// which is alias-resolved, while a stored row carries its raw key).
+func withoutTrade(txs []ledger.Transaction, old ledger.Transaction, canonical string) []ledger.Transaction {
+	out := make([]ledger.Transaction, 0, len(txs))
+	removed := false
+	for _, tx := range txs {
+		if !removed && tx.Platform == old.Platform && tx.Type == old.Type && tx.Instrument == canonical &&
+			tx.Date.Equal(old.Date) && tx.Quantity.Equal(old.Quantity) && tx.Price.Equal(old.Price) && tx.Currency == old.Currency {
+			removed = true
+			continue
+		}
+		out = append(out, tx)
+	}
+	return out
+}
+
+// loadManualTrade parses the "id" form field and finds the matching
+// hand-entered trade, writing the 400 or 404 itself when it can't.
+func (s *Server) loadManualTrade(w http.ResponseWriter, r *http.Request) (ledger.StoredTrade, bool) {
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, fmt.Sprintf("trade: invalid id %q", r.FormValue("id")), http.StatusBadRequest)
+		return ledger.StoredTrade{}, false
+	}
+	trades, err := s.ledgerStore.ManualTrades()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading trades: %v", err), http.StatusInternalServerError)
+		return ledger.StoredTrade{}, false
+	}
+	for _, tr := range trades {
+		if tr.ID == id {
+			return tr, true
+		}
+	}
+	http.Error(w, "trade: no such manual trade", http.StatusNotFound)
+	return ledger.StoredTrade{}, false
+}
+
+// handleTradeUpdate corrects a hand-entered trade: POST /trade/update
+// with "id" and the trade's "kind", "date", "quantity", "price" and
+// "currency". The instrument is not editable — a trade logged against
+// the wrong holding is deleted and logged again, so an edit can never
+// introduce an unclassified instrument. The edit is refused if it would
+// leave any sell of the holding exceeding the quantity held (the same
+// guard as entry). Imported rows are never reachable here: 404.
+func (s *Server) handleTradeUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parsing form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	stored, ok := s.loadManualTrade(w, r)
+	if !ok {
+		return
+	}
+
+	tx, err := manualtrade.NewTrade(
+		r.FormValue("kind"),
+		stored.Instrument,
+		r.FormValue("date"),
+		r.FormValue("quantity"),
+		r.FormValue("price"),
+		r.FormValue("currency"),
+	)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	existing, err := s.ledgerStore.All()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading ledger: %v", err), http.StatusInternalServerError)
+		return
+	}
+	aliasMap, err := s.aliasStore.All()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading aliases: %v", err), http.StatusInternalServerError)
+		return
+	}
+	canonical := stored.Instrument
+	if c, isAlias := aliasMap[canonical]; isAlias {
+		canonical = c
+	}
+	replaced := tx
+	replaced.Instrument = canonical
+	after := append(withoutTrade(existing, stored.Transaction, canonical), replaced)
+	if err := manualtrade.CheckHolding(after, canonical); err != nil {
+		http.Error(w, fmt.Sprintf("trade: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	switch err := s.ledgerStore.UpdateManualTrade(stored.ID, tx); {
+	case errors.Is(err, ledger.ErrNotManualTrade):
+		http.Error(w, "trade: no such manual trade", http.StatusNotFound)
+		return
+	case errors.Is(err, ledger.ErrDuplicateManualTrade):
+		http.Error(w, "trade: a trade with those details already exists", http.StatusConflict)
+		return
+	case err != nil:
+		http.Error(w, fmt.Sprintf("trade: updating: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// handleTradeDelete removes a hand-entered trade: POST /trade/delete
+// with "id". Refused if a later sell of the holding depends on it (a
+// deleted buy would leave the sell exceeding the quantity held, which
+// the engine treats as a hard error). Imported rows are never reachable
+// here: 404.
+func (s *Server) handleTradeDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parsing form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	stored, ok := s.loadManualTrade(w, r)
+	if !ok {
+		return
+	}
+
+	existing, err := s.ledgerStore.All()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading ledger: %v", err), http.StatusInternalServerError)
+		return
+	}
+	aliasMap, err := s.aliasStore.All()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading aliases: %v", err), http.StatusInternalServerError)
+		return
+	}
+	canonical := stored.Instrument
+	if c, isAlias := aliasMap[canonical]; isAlias {
+		canonical = c
+	}
+	if err := manualtrade.CheckHolding(withoutTrade(existing, stored.Transaction, canonical), canonical); err != nil {
+		http.Error(w, fmt.Sprintf("trade: deleting this would leave a later sell without enough units: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	switch err := s.ledgerStore.DeleteManualTrade(stored.ID); {
+	case errors.Is(err, ledger.ErrNotManualTrade):
+		http.Error(w, "trade: no such manual trade", http.StatusNotFound)
+		return
+	case err != nil:
+		http.Error(w, fmt.Sprintf("trade: deleting: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// portfolioPosition is one currently-held instrument on the portfolio
 // market symbol mapped to it, and — when a live quote and a EUR rate
 // were both available — its current market value. See SPEC.md §9.
 //
@@ -1909,12 +2104,13 @@ type dashboardData struct {
 	InterestCredits   []interestCreditRow
 	InterestSources   []string   // account names already used, suggested on the entry form
 	InterestBatchRows []struct{} // blank grid rows to render; only the count matters
-	ChartDataJS       template.JS
-
 	TradeHoldings     []tradeHolding
 	TradeBatchRows    []struct{} // blank grid rows to render; only the count matters
 	// Years is the tax-year selector's options (descending);
 	// SelectedYear is the active filter, 0 meaning "all years".
+	ManualTrades      []manualTradeRow
+	ChartDataJS       template.JS
+
 	Years        []int
 	SelectedYear int
 }
@@ -2051,9 +2247,6 @@ function addInterestRow() {
 </section>
 
 <section class="card">
-<h2>Log RSU vest</h2>
-<form class="form-row" action="/rsu" method="post">
-<section class="card">
 <h2>Log trade</h2>
 <form action="/trade" method="post">
 <table class="data" id="trade-batch">
@@ -2091,6 +2284,49 @@ function addTradeRow() {
 <label>Symbol: <input type="text" name="symbol" placeholder="ACME" required></label>
 <label>Vest date: <input type="date" name="date" required></label>
 <label>Quantity: <input type="text" name="quantity" inputmode="decimal" required></label>
+<section class="card">
+<details class="disclosure">
+<summary>Manual trades logged{{if .ManualTrades}} ({{len .ManualTrades}}){{end}}</summary>
+<div class="disclosure-body">
+{{if .ManualTrades}}
+<table class="data">
+<thead><tr><th>Type</th><th>Holding</th><th>Date</th><th>Quantity</th><th>Price per unit</th><th>Currency</th><th></th><th></th></tr></thead>
+<tbody>
+{{range .ManualTrades}}
+<tr>
+<td><select form="mt-{{.ID}}" name="kind"><option value="buy"{{if eq .Kind "buy"}} selected{{end}}>Buy</option><option value="sell"{{if eq .Kind "sell"}} selected{{end}}>Sell</option></select></td>
+<td>{{.Instrument}}</td>
+<td><input form="mt-{{.ID}}" type="date" name="date" value="{{.Date}}" required></td>
+<td><input form="mt-{{.ID}}" type="text" name="quantity" inputmode="decimal" value="{{.Quantity}}" required></td>
+<td><input form="mt-{{.ID}}" class="money" type="text" name="price" inputmode="decimal" value="{{.Price}}" required></td>
+<td><input form="mt-{{.ID}}" type="text" name="currency" value="{{.Currency}}" required></td>
+<td>
+<form id="mt-{{.ID}}" action="/trade/update" method="post">
+<input type="hidden" name="id" value="{{.ID}}">
+<button type="submit">Save</button>
+</form>
+</td>
+<td>
+<form action="/trade/delete" method="post" onsubmit="return confirm('Delete this trade?')">
+<input type="hidden" name="id" value="{{.ID}}">
+<button type="submit">Delete</button>
+</form>
+</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+<p class="muted">Logged against the wrong holding? Delete the trade and log it again. A change that would leave a sell larger than what you hold is refused.</p>
+{{else}}
+<p>No manual trades logged yet.</p>
+{{end}}
+</div>
+</details>
+</section>
+
+<section class="card">
+<h2>Log RSU vest</h2>
+<form class="form-row" action="/rsu" method="post">
 <label>FMV per share: <input type="text" name="fmv" inputmode="decimal" placeholder="0.00" required></label>
 <label>Currency: <input type="text" name="currency" value="USD" required></label>
 <button type="submit">Log vest</button>

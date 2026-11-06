@@ -175,3 +175,23 @@ func TestCheckNoOversell(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckHolding(t *testing.T) {
+	ledgerTxs := []ledger.Transaction{
+		tx(t, ledger.TypeBuy, "ACME", "2024-01-01", "10"),
+		tx(t, ledger.TypeSell, "ACME", "2024-02-01", "10"),
+		tx(t, ledger.TypeSell, "BROKEN", "2024-01-01", "5"),
+	}
+	if err := CheckHolding(ledgerTxs, "ACME"); err != nil {
+		t.Errorf("ACME balances, got %v", err)
+	}
+	if err := CheckHolding(ledgerTxs, "BROKEN"); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("BROKEN oversells, got %v", err)
+	}
+	if err := CheckHolding(ledgerTxs[1:2], "ACME"); err == nil {
+		t.Error("a sell with its buy removed must be reported")
+	}
+	if err := CheckHolding(nil, "NOSUCH"); err != nil {
+		t.Errorf("an instrument with no transactions is fine, got %v", err)
+	}
+}

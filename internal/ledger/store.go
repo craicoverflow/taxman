@@ -286,3 +286,145 @@ func (s *Store) All() ([]Transaction, error) {
 	}
 	return out, rows.Err()
 }
+
+// ErrNotManualTrade is returned by UpdateManualTrade and
+// DeleteManualTrade when the target row id does not exist or is not a
+// hand-entered buy or sell. Imported transactions stay immutable
+// (SPEC.md §2).
+var ErrNotManualTrade = errors.New("ledger: row is not a hand-entered trade")
+
+// ErrDuplicateManualTrade is returned by UpdateManualTrade when the
+// corrected trade would collide with another stored transaction (same
+// fingerprint). Nothing is changed.
+var ErrDuplicateManualTrade = errors.New("ledger: a trade with the same details already exists")
+
+// StoredTrade is one hand-entered buy or sell paired with its database
+// row id, so the web layer can offer per-row correction or deletion.
+// Instrument is the key exactly as stored, not alias-resolved: the
+// fingerprint is computed from it.
+type StoredTrade struct {
+	ID int64
+	Transaction
+}
+
+// ManualTrades returns every hand-entered buy and sell (PlatformManual,
+// type buy or sell), most recent first, each with its row id; ties on
+// date are broken by row id descending. Together with the manual
+// interest credits these are the only transactions taxman lets the user
+// edit or delete — see ErrNotManualTrade.
+func (s *Store) ManualTrades() ([]StoredTrade, error) {
+	rows, err := s.db.Query(
+		`SELECT id, platform, type, date, instrument, quantity, price, currency, source_ref, description
+		 FROM transactions
+		 WHERE platform = ? AND type IN (?, ?)
+		 ORDER BY date DESC, id DESC`,
+		string(PlatformManual), string(TypeBuy), string(TypeSell),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying manual trades: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []StoredTrade
+	for rows.Next() {
+		var (
+			id                                 int64
+			platform, typ, dateStr, instrument string
+			quantityStr, priceStr, currency    string
+			sourceRef, description             string
+		)
+		if err := rows.Scan(&id, &platform, &typ, &dateStr, &instrument, &quantityStr, &priceStr, &currency, &sourceRef, &description); err != nil {
+			return nil, fmt.Errorf("scanning manual trade: %w", err)
+		}
+
+		date, err := time.Parse(time.RFC3339, dateStr)
+		if err != nil {
+			return nil, fmt.Errorf("parsing stored date %q: %w", dateStr, err)
+		}
+		quantity, err := decimal.NewFromString(quantityStr)
+		if err != nil {
+			return nil, fmt.Errorf("parsing stored quantity %q: %w", quantityStr, err)
+		}
+		price, err := decimal.NewFromString(priceStr)
+		if err != nil {
+			return nil, fmt.Errorf("parsing stored price %q: %w", priceStr, err)
+		}
+
+		out = append(out, StoredTrade{
+			ID: id,
+			Transaction: Transaction{
+				Platform:    Platform(platform),
+				Type:        Type(typ),
+				Date:        date,
+				Instrument:  instrument,
+				Quantity:    quantity,
+				Price:       price,
+				Currency:    currency,
+				SourceRef:   sourceRef,
+				Description: description,
+			},
+		})
+	}
+	return out, rows.Err()
+}
+
+// UpdateManualTrade replaces the stored row identified by id with tx,
+// recomputing its fingerprint. The WHERE clause pins the row to a
+// hand-entered buy or sell, so an imported transaction can never be
+// mutated through this path: a missing row or a non-matching
+// platform/type changes nothing and returns ErrNotManualTrade. A
+// collision with another stored transaction returns
+// ErrDuplicateManualTrade and changes nothing.
+func (s *Store) UpdateManualTrade(id int64, tx Transaction) error {
+	result, err := s.db.Exec(
+		`UPDATE transactions
+		 SET fingerprint = ?, type = ?, date = ?, instrument = ?, quantity = ?, price = ?, currency = ?
+		 WHERE id = ? AND platform = ? AND type IN (?, ?)`,
+		tx.Fingerprint(),
+		string(tx.Type),
+		tx.Date.UTC().Format(time.RFC3339),
+		tx.Instrument,
+		tx.Quantity.String(),
+		tx.Price.String(),
+		tx.Currency,
+		id, string(PlatformManual), string(TypeBuy), string(TypeSell),
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrDuplicateManualTrade
+		}
+		return fmt.Errorf("updating manual trade: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotManualTrade
+	}
+	return nil
+}
+
+// DeleteManualTrade removes the hand-entered buy or sell identified by
+// id. Like UpdateManualTrade it refuses to touch anything else,
+// returning ErrNotManualTrade when nothing matched.
+func (s *Store) DeleteManualTrade(id int64) error {
+	result, err := s.db.Exec(
+		`DELETE FROM transactions
+		 WHERE id = ? AND platform = ? AND type IN (?, ?)`,
+		id, string(PlatformManual), string(TypeBuy), string(TypeSell),
+	)
+	if err != nil {
+		return fmt.Errorf("deleting manual trade: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotManualTrade
+	}
+	return nil
+}

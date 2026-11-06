@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -619,5 +620,265 @@ func TestHandler_Dashboard_TradeForm_IsAGridWithAddRow(t *testing.T) {
 	}
 	if n := strings.Count(body, `name="quantity"`); n < 1 {
 		t.Errorf("expected at least one trade grid row, found %d quantity inputs", n)
+	}
+}
+
+// --- List, edit and delete (SPEC.md §18) ---
+
+func newPostRequest(path string, fields map[string]string) *http.Request {
+	form := url.Values{}
+	for k, v := range fields {
+		form.Set(k, v)
+	}
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req
+}
+
+// seedManualTrades has the imported 10 AAPL (2023-01-01), then a manual
+// buy of 5 (2023-06-01) and a manual sell of 12 (2024-06-01). It returns
+// the buy's and the sell's row ids. The sell depends on the manual buy:
+// without it only 10 are held.
+func seedManualTrades(t *testing.T, conn *sql.DB) (buyID, sellID int64) {
+	t.Helper()
+	seedAAPLHolding(t, conn)
+	handler := NewServer(conn).Handler()
+	for _, row := range []map[string]string{
+		tradeRow("buy", "AAPL", "2023-06-01", "5", "20"),
+		tradeRow("sell", "AAPL", "2024-06-01", "12", "1000"),
+	} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, newTradeBatchRequest(row))
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("seeding: status = %d; body: %s", rec.Code, rec.Body.String())
+		}
+	}
+	trades, err := ledger.NewStore(conn).ManualTrades()
+	if err != nil || len(trades) != 2 {
+		t.Fatalf("ManualTrades = %v, %v", trades, err)
+	}
+	for _, tr := range trades {
+		if tr.Type == ledger.TypeBuy {
+			buyID = tr.ID
+		} else {
+			sellID = tr.ID
+		}
+	}
+	return buyID, sellID
+}
+
+func idStr(id int64) string { return strconv.FormatInt(id, 10) }
+
+func TestHandler_Dashboard_ListsManualTradesWithEditAndDelete(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	buyID, _ := seedManualTrades(t, conn)
+
+	body := dashboardBody(t, conn, "/")
+	for _, want := range []string{
+		"Manual trades logged (2)", `action="/trade/update"`, `action="/trade/delete"`,
+		`name="id" value="` + idStr(buyID) + `"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected the dashboard to include %q", want)
+		}
+	}
+}
+
+func TestHandler_TradeUpdate_ChangesTheTradeAndRecomputesCGT(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	_, sellID := seedManualTrades(t, conn)
+
+	// Correct the sell to 10 units at 1000: gain 9900 -> €2,847.00.
+	rec := httptest.NewRecorder()
+	NewServer(conn).Handler().ServeHTTP(rec, newPostRequest("/trade/update", map[string]string{
+		"id": idStr(sellID), "kind": "sell", "date": "2024-06-01",
+		"quantity": "10", "price": "1000", "currency": "EUR",
+	}))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303; body: %s", rec.Code, rec.Body.String())
+	}
+
+	trades, _ := ledger.NewStore(conn).ManualTrades()
+	for _, tr := range trades {
+		if tr.ID == sellID && (!tr.Quantity.Equal(mustDecimal(t, "10")) || tr.Instrument != "AAPL") {
+			t.Errorf("sell = %+v, want quantity 10 on AAPL", tr)
+		}
+	}
+	if body := dashboardBody(t, conn, "/?year=2024"); !strings.Contains(body, "€2,847.00") {
+		t.Errorf("expected €2,847.00 after the correction, got: %s", body)
+	}
+}
+
+func TestHandler_TradeUpdate_IgnoresAPostedInstrument(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	buyID, _ := seedManualTrades(t, conn)
+
+	rec := httptest.NewRecorder()
+	NewServer(conn).Handler().ServeHTTP(rec, newPostRequest("/trade/update", map[string]string{
+		"id": idStr(buyID), "kind": "buy", "instrument": "OTHER", "date": "2023-06-01",
+		"quantity": "6", "price": "20", "currency": "EUR",
+	}))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303; body: %s", rec.Code, rec.Body.String())
+	}
+	trades, _ := ledger.NewStore(conn).ManualTrades()
+	for _, tr := range trades {
+		if tr.ID == buyID && tr.Instrument != "AAPL" {
+			t.Errorf("Instrument = %q: an edit must not move a trade to another holding", tr.Instrument)
+		}
+	}
+}
+
+func TestHandler_TradeUpdate_RefusedWhenItWouldStrandALaterSell(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	buyID, _ := seedManualTrades(t, conn)
+
+	for name, fields := range map[string]map[string]string{
+		"shrinking the buy below what the sell needs": {"kind": "buy", "date": "2023-06-01", "quantity": "1", "price": "20"},
+		"moving the buy after the sell":               {"kind": "buy", "date": "2024-12-01", "quantity": "5", "price": "20"},
+		"turning the buy into a sell":                 {"kind": "sell", "date": "2023-06-01", "quantity": "5", "price": "20"},
+	} {
+		fields["id"], fields["currency"] = idStr(buyID), "EUR"
+		rec := httptest.NewRecorder()
+		NewServer(conn).Handler().ServeHTTP(rec, newPostRequest("/trade/update", fields))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "exceeds") {
+			t.Errorf("%s: status = %d body = %q, want 400 naming the shortfall", name, rec.Code, rec.Body.String())
+		}
+	}
+	trades, _ := ledger.NewStore(conn).ManualTrades()
+	for _, tr := range trades {
+		if tr.ID == buyID && (!tr.Quantity.Equal(mustDecimal(t, "5")) || tr.Type != ledger.TypeBuy) {
+			t.Errorf("buy = %+v, want it untouched after refused edits", tr)
+		}
+	}
+}
+
+func TestHandler_TradeUpdate_BadRequests(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	buyID, _ := seedManualTrades(t, conn)
+	handler := NewServer(conn).Handler()
+	good := map[string]string{"id": idStr(buyID), "kind": "buy", "date": "2023-06-01", "quantity": "5", "price": "21", "currency": "EUR"}
+	with := func(k, v string) map[string]string {
+		m := map[string]string{}
+		maps.Copy(m, good)
+		m[k] = v
+		return m
+	}
+
+	for name, tc := range map[string]struct {
+		fields map[string]string
+		want   int
+	}{
+		"missing id":          {with("id", ""), http.StatusBadRequest},
+		"non-numeric id":      {with("id", "x"), http.StatusBadRequest},
+		"bad kind":            {with("kind", "dividend"), http.StatusBadRequest},
+		"bad date":            {with("date", "nope"), http.StatusBadRequest},
+		"zero quantity":       {with("quantity", "0"), http.StatusBadRequest},
+		"missing currency":    {with("currency", ""), http.StatusBadRequest},
+		"unknown id":          {with("id", "9999"), http.StatusNotFound},
+		"imported row (id 1)": {with("id", "1"), http.StatusNotFound},
+	} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, newPostRequest("/trade/update", tc.fields))
+		if rec.Code != tc.want {
+			t.Errorf("%s: status = %d, want %d; body: %s", name, rec.Code, tc.want, rec.Body.String())
+		}
+	}
+	trades, _ := ledger.NewStore(conn).ManualTrades()
+	for _, tr := range trades {
+		if tr.ID == buyID && !tr.Price.Equal(mustDecimal(t, "20")) {
+			t.Errorf("price = %s: a refused request must change nothing", tr.Price)
+		}
+	}
+}
+
+func TestHandler_TradeUpdate_DuplicateOfAnotherTradeIsAConflict(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	handler := NewServer(conn).Handler()
+	seedAAPLHolding(t, conn)
+	for _, row := range []map[string]string{
+		tradeRow("buy", "AAPL", "2023-06-01", "1", "20"),
+		tradeRow("buy", "AAPL", "2023-07-01", "2", "30"),
+	} {
+		handler.ServeHTTP(httptest.NewRecorder(), newTradeBatchRequest(row))
+	}
+	trades, _ := ledger.NewStore(conn).ManualTrades()
+	var second int64
+	for _, tr := range trades {
+		if tr.Date.Equal(mustDate(t, "2023-07-01")) {
+			second = tr.ID
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newPostRequest("/trade/update", map[string]string{
+		"id": idStr(second), "kind": "buy", "date": "2023-06-01", "quantity": "1", "price": "20", "currency": "EUR",
+	}))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_TradeDelete_RemovesATradeNothingDependsOn(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	_, sellID := seedManualTrades(t, conn)
+
+	rec := httptest.NewRecorder()
+	NewServer(conn).Handler().ServeHTTP(rec, newPostRequest("/trade/delete", map[string]string{"id": idStr(sellID)}))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303; body: %s", rec.Code, rec.Body.String())
+	}
+	if trades, _ := ledger.NewStore(conn).ManualTrades(); len(trades) != 1 {
+		t.Errorf("manual trades = %d, want 1", len(trades))
+	}
+}
+
+func TestHandler_TradeDelete_RefusedWhenALaterSellDependsOnIt(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	buyID, _ := seedManualTrades(t, conn)
+
+	rec := httptest.NewRecorder()
+	NewServer(conn).Handler().ServeHTTP(rec, newPostRequest("/trade/delete", map[string]string{"id": idStr(buyID)}))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "exceeds") {
+		t.Fatalf("status = %d body = %q, want 400 naming the shortfall", rec.Code, rec.Body.String())
+	}
+	if trades, _ := ledger.NewStore(conn).ManualTrades(); len(trades) != 2 {
+		t.Errorf("manual trades = %d, want 2", len(trades))
+	}
+}
+
+func TestHandler_TradeDelete_BadRequests(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	seedManualTrades(t, conn)
+	handler := NewServer(conn).Handler()
+
+	for name, tc := range map[string]struct {
+		id   string
+		want int
+	}{
+		"missing id":          {"", http.StatusBadRequest},
+		"non-numeric id":      {"x", http.StatusBadRequest},
+		"unknown id":          {"9999", http.StatusNotFound},
+		"imported row (id 1)": {"1", http.StatusNotFound},
+	} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, newPostRequest("/trade/delete", map[string]string{"id": tc.id}))
+		if rec.Code != tc.want {
+			t.Errorf("%s: status = %d, want %d", name, rec.Code, tc.want)
+		}
+	}
+	if got := countTransactions(t, conn); got != 3 {
+		t.Errorf("transactions = %d, want 3: nothing may be deleted", got)
+	}
+}
+
+func TestHandler_TradeUpdateAndDelete_GET_NotAllowed(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	for _, path := range []string{"/trade/update", "/trade/delete"} {
+		rec := httptest.NewRecorder()
+		NewServer(conn).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("GET %s: status = %d, want 405", path, rec.Code)
+		}
 	}
 }
