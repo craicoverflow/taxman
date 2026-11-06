@@ -26,6 +26,7 @@ import (
 	"github.com/craicoverflow/taxman/internal/ingest"
 	"github.com/craicoverflow/taxman/internal/ingest/etrade"
 	"github.com/craicoverflow/taxman/internal/ingest/interest"
+	"github.com/craicoverflow/taxman/internal/ingest/manualtrade"
 	"github.com/craicoverflow/taxman/internal/ledger"
 	"github.com/craicoverflow/taxman/internal/prices"
 	"github.com/craicoverflow/taxman/internal/tickers"
@@ -113,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/rsu", s.handleRSUVest)
 	mux.HandleFunc("/sale", s.handleSale)
 	mux.HandleFunc("/portfolio", s.handlePortfolio)
+	mux.HandleFunc("/trade", s.handleTrade)
 	mux.HandleFunc("/portfolio/ticker", s.handlePortfolioTicker)
 	mux.HandleFunc("/portfolio/merge", s.handlePortfolioMerge)
 	mux.HandleFunc("/portfolio/unmerge", s.handlePortfolioUnmerge)
@@ -603,6 +605,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		InterestSources:   interestSources,
 		InterestBatchRows: make([]struct{}, interestBatchRows),
 		ChartDataJS:       chartJS,
+		TradeHoldings:     tradeHoldings(txs),
+		TradeBatchRows:    make([]struct{}, tradeBatchRows),
 		Years:             years,
 		SelectedYear:      selectedYear,
 	}); err != nil {
@@ -1070,6 +1074,200 @@ func (s *Server) handleSale(w http.ResponseWriter, r *http.Request) {
 }
 
 // portfolioPosition is one currently-held instrument on the portfolio
+// tradeHolding is one option in the "Log trade" card's holding picker:
+// an instrument that already has buys, sells or vests in the ledger.
+type tradeHolding struct {
+	Key   string
+	Label string
+}
+
+// tradeHoldings lists the instruments a manual trade may be logged
+// against: those with at least one buy, sell or RSU vest. A savings
+// account that only has interest credits is not a holding. txs come
+// from ledger.Store.All, so keys are alias-resolved (SPEC.md §17).
+func tradeHoldings(txs []ledger.Transaction) []tradeHolding {
+	labels := map[string]string{}
+	for _, tx := range txs {
+		switch tx.Type {
+		case ledger.TypeBuy, ledger.TypeSell, ledger.TypeRSUVest:
+			if tx.Description != "" || labels[tx.Instrument] == "" {
+				labels[tx.Instrument] = tx.Description
+			}
+		}
+	}
+	out := make([]tradeHolding, 0, len(labels))
+	for key, desc := range labels {
+		label := key
+		if desc != "" {
+			label = desc + " (" + key + ")"
+		}
+		out = append(out, tradeHolding{Key: key, Label: label})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
+}
+
+// tradeBatchRows is how many blank rows the "Log trade" grid starts
+// with; the "Add row" button clones more. One row is the common case.
+const tradeBatchRows = 1
+
+// formAt returns the i-th value of a repeated form field, trimmed, or
+// "" when the field has fewer values (a client that omits a column).
+func formAt(values []string, i int) string {
+	if i < len(values) {
+		return strings.TrimSpace(values[i])
+	}
+	return ""
+}
+
+// handleTrade logs hand-entered stock or ETF buys and sells: POST /trade
+// with parallel "kind" (buy|sell), "instrument" (a holding picked from
+// the list), "new_instrument" (an ISIN or ticker typed in), "classification",
+// "date" (YYYY-MM-DD), "quantity", "price" (per unit, in "currency") and
+// "currency" fields, one value per grid row, like /interest.
+//
+// Each trade is stored on ledger.PlatformManual and consumed by
+// internal/engine's FIFO matcher exactly as an imported one would be,
+// restated to euro at the trade-date rate (never here). Currency is
+// required and never defaulted.
+//
+// An instrument that is not yet a holding must be typed in with an
+// explicit CGT_ASSET or EXIT_TAX_FUND classification, recorded with the
+// trade and never guessed; a known holding must not carry one (it would
+// overwrite the user's earlier choice). For a new instrument any one of
+// its rows in the batch may carry the classification, in any order, but
+// those that do must agree. A sell larger than
+// the quantity held at its date, counting the whole batch in date order,
+// is refused: the engine treats that as a hard error that would break
+// computation for the whole dashboard.
+//
+// The batch is all-or-nothing on validation: blank rows are skipped, but
+// one invalid row, or no filled row at all, is a 400 that writes nothing.
+// Valid trades are then inserted row by row. See SPEC.md §18.
+func (s *Server) handleTrade(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parsing form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	existing, err := s.ledgerStore.All()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading ledger: %v", err), http.StatusInternalServerError)
+		return
+	}
+	known := map[string]bool{}
+	for _, h := range tradeHoldings(existing) {
+		known[h.Key] = true
+	}
+	aliasMap, err := s.aliasStore.All()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading aliases: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	f := r.PostForm
+	rows := 0
+	for _, name := range []string{"kind", "instrument", "new_instrument", "classification", "date", "quantity", "price", "currency"} {
+		rows = max(rows, len(f[name]))
+	}
+
+	var trades []ledger.Transaction
+	introduced := map[string]classify.Classification{} // classification given for each new instrument
+	newInstrumentRow := map[string]int{}               // first row that mentions each new instrument
+	for i := 0; i < rows; i++ {
+		// A new instrument is typed into new_instrument and wins over
+		// the picker, which only lists holdings already in the ledger.
+		instrument := formAt(f["new_instrument"], i)
+		if instrument == "" {
+			instrument = formAt(f["instrument"], i)
+		}
+		date, quantity, price, currency := formAt(f["date"], i), formAt(f["quantity"], i), formAt(f["price"], i), formAt(f["currency"], i)
+		if instrument == "" && date == "" && quantity == "" && price == "" && currency == "" {
+			continue // untouched grid row (kind and classification have defaults)
+		}
+
+		tx, err := manualtrade.NewTrade(formAt(f["kind"], i), instrument, date, quantity, price, currency)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("trade: row %d: %v", i+1, err), http.StatusBadRequest)
+			return
+		}
+
+		// The classification is the user's statement about a holding's
+		// tax treatment and is never guessed.
+		classificationArg := formAt(f["classification"], i)
+		if known[tx.Instrument] {
+			if classificationArg != "" {
+				http.Error(w, fmt.Sprintf("trade: row %d: %q is already a holding; leave classification blank (change it on the classification form)", i+1, tx.Instrument), http.StatusBadRequest)
+				return
+			}
+		} else {
+			if canonical, isAlias := aliasMap[tx.Instrument]; isAlias {
+				http.Error(w, fmt.Sprintf("trade: row %d: %q is merged into %q; log the trade against %q", i+1, tx.Instrument, canonical, canonical), http.StatusBadRequest)
+				return
+			}
+			if _, seen := newInstrumentRow[tx.Instrument]; !seen {
+				newInstrumentRow[tx.Instrument] = i + 1
+			}
+			// Any row of a new instrument may carry its classification
+			// (so row order doesn't matter), but all that do must agree.
+			if classificationArg != "" {
+				c, ok := classify.ValidClassifications[classificationArg]
+				if !ok {
+					http.Error(w, fmt.Sprintf("trade: row %d: invalid classification %q (expected CGT_ASSET or EXIT_TAX_FUND)", i+1, classificationArg), http.StatusBadRequest)
+					return
+				}
+				if prior, set := introduced[tx.Instrument]; set && prior != c {
+					http.Error(w, fmt.Sprintf("trade: row %d: %q is given classification %s here but %s in another row", i+1, tx.Instrument, c, prior), http.StatusBadRequest)
+					return
+				}
+				introduced[tx.Instrument] = c
+			}
+		}
+
+		trades = append(trades, tx)
+	}
+	if len(trades) == 0 {
+		http.Error(w, "trade: no trades to log", http.StatusBadRequest)
+		return
+	}
+	for instrument, row := range newInstrumentRow {
+		if _, ok := introduced[instrument]; !ok {
+			http.Error(w, fmt.Sprintf("trade: row %d: %q is not a holding in the ledger yet; choose its classification (CGT_ASSET or EXIT_TAX_FUND)", row, instrument), http.StatusBadRequest)
+			return
+		}
+	}
+
+	if err := manualtrade.CheckNoOversell(existing, trades); err != nil {
+		http.Error(w, fmt.Sprintf("trade: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Classifications first: a leftover entry for an instrument with no
+	// transactions is inert, whereas a trade with no classification
+	// would block that holding's computation.
+	for instrument, c := range introduced {
+		if err := s.classifyStore.Set(instrument, c); err != nil {
+			http.Error(w, fmt.Sprintf("trade: classifying %s: %v", instrument, err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	for _, tx := range trades {
+		if _, err := s.ledgerStore.Insert(tx); err != nil {
+			http.Error(w, fmt.Sprintf("trade: inserting: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 // page: what remains after FIFO disposals (engine.OpenPositions), the
 // market symbol mapped to it, and — when a live quote and a EUR rate
 // were both available — its current market value. See SPEC.md §9.
@@ -1713,6 +1911,8 @@ type dashboardData struct {
 	InterestBatchRows []struct{} // blank grid rows to render; only the count matters
 	ChartDataJS       template.JS
 
+	TradeHoldings     []tradeHolding
+	TradeBatchRows    []struct{} // blank grid rows to render; only the count matters
 	// Years is the tax-year selector's options (descending);
 	// SelectedYear is the active filter, 0 meaning "all years".
 	Years        []int
@@ -1853,6 +2053,41 @@ function addInterestRow() {
 <section class="card">
 <h2>Log RSU vest</h2>
 <form class="form-row" action="/rsu" method="post">
+<section class="card">
+<h2>Log trade</h2>
+<form action="/trade" method="post">
+<table class="data" id="trade-batch">
+<thead><tr><th>Type</th><th>Holding</th><th>or new instrument</th><th>Classification (new only)</th><th>Date</th><th>Quantity</th><th>Price per unit</th><th>Currency</th></tr></thead>
+<tbody>
+{{range .TradeBatchRows}}<tr>
+<td><select name="kind"><option value="buy">Buy</option><option value="sell">Sell</option></select></td>
+<td><select name="instrument"><option value="">&mdash;</option>{{range $.TradeHoldings}}<option value="{{.Key}}">{{.Label}}</option>{{end}}</select></td>
+<td><input type="text" name="new_instrument" placeholder="ISIN or ticker"></td>
+<td><select name="classification"><option value="">&mdash;</option><option value="CGT_ASSET">CGT_ASSET</option><option value="EXIT_TAX_FUND">EXIT_TAX_FUND</option></select></td>
+<td><input type="date" name="date"></td>
+<td><input type="text" name="quantity" inputmode="decimal"></td>
+<td><input type="text" name="price" inputmode="decimal" placeholder="0.00"></td>
+<td><input type="text" name="currency" placeholder="EUR"></td>
+</tr>
+{{end}}</tbody>
+</table>
+<div class="form-row">
+<button type="button" onclick="addTradeRow()">Add row</button>
+<button type="submit">Log trades</button>
+</div>
+</form>
+<script>
+function addTradeRow() {
+	var body = document.querySelector('#trade-batch tbody');
+	var row = body.rows[0].cloneNode(true);
+	row.querySelectorAll('input').forEach(function (input) { input.value = ''; });
+	row.querySelectorAll('select').forEach(function (select) { select.selectedIndex = 0; });
+	body.appendChild(row);
+}
+</script>
+<p class="muted">Buys and sells are matched FIFO like imported trades and restated to euro at the trade-date rate. A sell larger than what you hold on that date is refused. Fees not included &mdash; taxman does not model them yet, so a trade logged here carries no fee, same as an imported one. Pick an existing holding, or type a new instrument (an ISIN or a ticker) and say how it is taxed &mdash; taxman never guesses that. Leave blank rows empty.</p>
+</section>
+
 <label>Symbol: <input type="text" name="symbol" placeholder="ACME" required></label>
 <label>Vest date: <input type="date" name="date" required></label>
 <label>Quantity: <input type="text" name="quantity" inputmode="decimal" required></label>
