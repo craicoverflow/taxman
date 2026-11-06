@@ -528,8 +528,8 @@ DIRT is DIRT. TCA 1997 s.256 charges it on deposit interest without regard to wh
 - **No engine change.** `engine.ComputeCGT`'s FIFO matcher already consumes `sell`-type transactions against a holding's open lots regardless of how those lots or the sale entered the ledger; a non-EUR sale is restated to euro at its sale-date ECB rate by the existing `toEURPrices` path, same as a vest. The holding must already be `CGT_ASSET` (confirmed already the case for the ETRADE RSU holding in question) — an unclassified holding still blocks computation per §6, unchanged.
 
 ### Out of scope
-- Any platform other than E*TRADE — one manual builder, `PlatformETRADE`, same restriction as §11.
-- Batch entry — one sale per submit, same rationale as §11 (sales are rarer than interest credits, which is why that batch grid exists).
+- Any platform other than E*TRADE — one manual builder, `PlatformETRADE`, same restriction as §11. *(Superseded for buys and sells by §18, which adds `PlatformManual` entry for any stock or ETF.)*
+- Batch entry — one sale per submit, same rationale as §11 (sales are rarer than interest credits, which is why that batch grid exists). *(Superseded by §18's batch grid.)*
 - A new "disposals" list/table or an audit-trail view on the dashboard — confirmed out of scope (2026-10-09 interview-me): the existing aggregated liability summary is the only display surface this feature needs. A per-disposal table stays a possible future pass, not part of this one.
 - Any fix to `internal/ingest/etrade.Parse`'s CSV column assumptions — still unverified against a real export, orthogonal to this manual path.
 
@@ -557,6 +557,41 @@ Imports key a holding differently: Degiro and the IBKR flat/Activity layouts by 
 - **By shared symbol.** Mapping a holding to a market symbol (§9) that another holding already carries (case-insensitive, e.g. both `SXR8.DE`) merges the two automatically — the user typed both symbols, so this is their statement, not an inference. It writes an ordinary alias entry (reversible with Unmerge): the holding that already had the symbol stays canonical, unless the newly mapped one already has merges of its own. If a guard refuses the merge (chain, classification mismatch) the symbol is still saved and the response is `400` saying the merge did not happen.
 - **Not for duplicates.** This is for distinct trades recorded under two keys. The same trade imported from two sources is a separate problem (fingerprints include platform and instrument) and is not handled here.
 
+## 18. Feature: Single-trade entry (stock/ETF)
+
+**Status:** in progress (2026-11-06; tasks in `tasks/plan.md` Phase 12, idea doc `docs/ideas/single-trade-entry.md`). Built so far: the `POST /trade` batch grid with holding picker, new-instrument classification and oversell guard (12.1–12.3). Still to build: list/edit/delete of manual trades (12.4), the import near-match warning (12.5), and removing the "Log stock sale" card (12.6) — those parts of **Shape** below are not yet in effect. Supersedes §16's "other platforms" and "batch entry" exclusions for buys and sells.
+
+### Objective
+Today a trade reaches the ledger only by CSV import, apart from E*TRADE RSU vests (§11) and sales (§16), which are hand-entered. There is no manual **buy**, and an ETF cannot be entered by hand at all: §16's form takes a bare symbol and is hard-wired to `PlatformETRADE`. This adds one buy/sell entry path for any stock or ETF, for the quick top-up between exports. CSV import stays first-class and unchanged; both paths are supported.
+
+### Shape
+- `internal/ingest/manualtrade.NewTrade(kind, instrument, date, quantity, price, currency)` builds a `ledger.Transaction` of type `buy` or `sell` on `ledger.PlatformManual`, with the same validation shape as `etrade.NewSale` (non-empty instrument and currency, `YYYY-MM-DD`, positive decimals, currency upper-cased). No FX or engine logic: restatement to euro happens once, in `engine`.
+- `POST /trade` takes parallel rows (`kind`, `instrument`, `date`, `quantity`, `price`, `currency`), as `/interest` does: blank rows skipped, a half-filled row or zero filled rows is a `400` that writes nothing, valid batches are inserted row by row.
+- **Instrument.** Picked from holdings already in the ledger (alias-resolved, §17), or a new one typed by the user as an ISIN **or** a ticker — either is accepted, with no lookup, no format inference and no normalisation beyond trimming. A new instrument must also carry an explicit `CGT_ASSET` or `EXIT_TAX_FUND` classification, written with the trade; in a batch any one row of that instrument may carry it, in any order, but rows that do must agree. A key already merged into another (§17) is refused with a pointer to the canonical key. A classification supplied for an already-known instrument is refused, never overwritten. Currency is required and never defaulted.
+- **Oversell guard.** A sell larger than the quantity held at its date is a hard engine error that would break computation for the whole dashboard, so every write path (add, batch, edit, delete) refuses it, using `engine.OpenPositions`. A batch is checked in date order, so a sell may follow a buy entered in the same batch.
+- **Manage.** Manual trades (`platform = manual AND type IN (buy, sell)`) can be listed, edited and deleted, like manual interest credits; the fingerprint is recomputed on edit, and imported rows can never be touched through these paths.
+- **Import near-match warning.** The fingerprint includes the platform, so a `PlatformManual` row never exact-dedupes against an imported one. When an import contains a row whose alias-resolved instrument, type, date and quantity equal a manual trade's, the import reports it. **Price is ignored** in the match, so an identical trade also warns. The warning is advisory: the row is still stored by the existing fingerprint rules, and nothing is merged or deleted automatically. It is a heuristic, not a guarantee.
+- The dashboard "Log stock sale" card is removed. `POST /sale` and `etrade.NewSale` stay, so existing `PlatformETRADE` rows and scripted callers keep working. `/rsu` is unchanged.
+
+### Out of scope
+- **Fees and commission.** Not modelled anywhere: `ledger.Transaction` has no fee field, the IBKR parser states "Commission is not modelled", Degiro's fee column is defined but unused, and the engine and `docs/maths.md` are silent on incidental costs. Entering fees only on manual trades would make one trade compute differently depending on how it was entered. A separate feature, needing a Revenue TDM citation first. The form says "fees not included" beside the price.
+- Dividends, splits and transfers — each has its own tax mechanics.
+- Auto-reconciliation ("imports win") and any lookup that fills an ISIN, ticker or classification (§6).
+- Any change to `engine`, `taxrules` or `audit`.
+
+### Testing strategy
+- `manualtrade` unit tests: table-driven, mirroring `etrade.NewSale`'s cases plus `kind` validation.
+- `internal/web`: buy then sell yields the CGT figure the engine computes for the equivalent imported pair (an ETF case with a classification as well as a stock); oversell is a `400` that writes nothing, in single, batch (date-ordered) and edit/delete forms; a new instrument without a classification is a `400`.
+- `internal/ledger`: edit recomputes the fingerprint to match `Transaction.Fingerprint`; update and delete refuse imported rows and manual interest credits.
+- Near-match: a CSV containing a hand-entered trade warns and still stores the row; a different price still warns; a different date or quantity does not; aliased keys match.
+- No new golden fixture or `features/*.feature` scenario — no `engine`/`taxrules` change (§5/§6 triggers do not apply).
+
+### Boundaries specific to this feature
+- **Always:** refuse an oversell at entry; keep instrument, currency and classification user-entered.
+- **Never:** infer or default a classification, ticker, ISIN or currency; auto-merge or auto-delete on a near-match; model fees ad hoc on the manual path only.
+
+---
+
 ## Traceability
 
 | Idea doc item | Resolved here |
@@ -579,3 +614,4 @@ Imports key a holding differently: Degiro and the IBKR flat/Activity layouts by 
 | Output numbers cross-checked / verifiable by an accountant | §14, built 2026-09-06. `docs/maths.md` prose reference with Irish citations + `features/*.feature` (godog) executable, engine-pinned worked examples + CI drift gate. |
 | User-named interest accounts | §15, built 2026-09-06. Supersedes §10's source registry — DIRT does not turn on which bank paid, so no bank is modelled. Migration 0007 carries existing credits across. |
 | Manual stock-sale entry | §16, built 2026-10-09. `POST /sale` + dashboard card; `etrade.NewSale` — the disposal-side counterpart to §11's manual RSU-vest entry. |
+| Single-trade entry (stock/ETF) | §18, planned 2026-11-06. `POST /trade` buy/sell on `PlatformManual`, oversell guard, import near-match warning. Supersedes §16's platform and batch exclusions. Fees deliberately excluded. |

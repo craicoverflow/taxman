@@ -384,3 +384,143 @@ Suggested PR split: **11.1–11.3** = "portfolio plumbing" (no network, no user-
 ## Open questions — Phase 11
 
 - None blocking. Provider precedence (Yahoo → stooq), cache TTL (~15 min), and the keyless constraint are all resolved in SPEC §9.
+
+---
+
+## Phase 12 — Single-trade entry (stock/ETF)
+
+Per `docs/ideas/single-trade-entry.md` (refined 2026-11-06). One Buy/Sell form for any stock or ETF, entered singly or as a batch grid, stored on `PlatformManual`, with an import-time near-match warning. CSV import is unchanged and stays first-class. **No change to `internal/engine`, `internal/taxrules` or `internal/audit`** — `buy`/`sell` transactions already flow through FIFO. **Fees are out of scope**: they are modelled nowhere (no field on `ledger.Transaction`, IBKR parser: "Commission is not modelled", Degiro `colFees` unused) and need their own feature with a cited Revenue TDM source first.
+
+Findings from reading the code that shape the tasks:
+- **Oversell is a hard engine error** (`engine/cgt.go`, `deemeddisposal.go`). A typed sell larger than the held quantity would break CGT computation for the whole dashboard, so every write path guards it at entry using `engine.OpenPositions`.
+- **The fingerprint includes Platform** (`ledger/transaction.go`). A `PlatformManual` row can never exact-dedupe against a CSV row, so the near-match warning (12.5) is the only double-count protection. It matches on alias-resolved instrument + type + date + quantity and **ignores price**.
+- `UpdateManualInterestCredit` / `DeleteManualInterestCredit` are pinned to `type = interest`; trades need their own pinned methods (12.4).
+- SPEC §16 listed batch entry and non-E*TRADE platforms as out of scope; §18 (12.0) supersedes that.
+
+Dependency order: 12.0 → 12.1 → {12.2, 12.3, 12.4} → 12.5 → 12.6. Never-guess rules apply throughout: instrument key, currency and classification are user-entered; nothing is defaulted or inferred.
+
+---
+
+**12.0 — SPEC §18: single-trade entry**
+- Add SPEC §18 (objective, shape, out of scope, testing strategy, boundaries) in the style of §16. State explicitly that it supersedes §16's "batch entry" and "other platforms" exclusions for buy/sell, that `/rsu` is untouched, and that fees are a separate future feature. Update the traceability table and `docs/ideas` link.
+- **Acceptance:**
+  - [ ] §18 documents `PlatformManual` storage, the oversell guard, the price-ignoring near-match rule, and the fee non-goal.
+  - [ ] §16's out-of-scope bullets carry a pointer to §18.
+- **Verify:**
+  - [ ] `make check-docs`; `make ci`.
+- **Dependencies:** None.
+- **Files likely touched:** `SPEC.md`, `docs/ideas/single-trade-entry.md` (correct the near-match wording to "ignores price").
+- **Estimated scope:** XS.
+
+---
+
+**12.1 — Log one trade on an existing holding**
+- `internal/ingest/manualtrade`: `NewTrade(kind, instrument, date, quantity, price, currency string) (ledger.Transaction, error)` — `kind` is `buy` or `sell` only; same validation as `etrade.NewSale` (non-empty instrument/currency, `YYYY-MM-DD`, positive decimals, currency upper-cased); `Platform: PlatformManual`. No FX or engine logic here.
+- `ledger.Store` gains a read of distinct instruments (alias-resolved, with description) for the holding picker.
+- `POST /trade` (`handleTrade`): method guard → `ParseForm` → `NewTrade` → oversell guard (`engine.OpenPositions` over the instrument's transactions plus the new sell) → `Insert` → `303` to `/`. A "Log trade" card with a holding `<select>`/`<datalist>`, required currency (no default) and a "fees not included" note.
+- **Acceptance:**
+  - [ ] Buy then sell of the same instrument yields the CGT figure the engine computes for the equivalent imported pair, on the dashboard.
+  - [ ] A sell exceeding held quantity at its date → `400`, nothing written, message names the shortfall.
+  - [ ] Bad date/quantity/price/kind or empty currency → `400`, nothing written; non-POST → `405`.
+  - [ ] An instrument not already in the ledger is refused here (handled by 12.2).
+- **Verify:**
+  - [ ] `go test ./internal/ingest/manualtrade/... ./internal/web/... ./internal/ledger/...`
+  - [ ] Manual: `make dev`, log a buy and a partial sell, confirm the liability summary.
+  - [ ] `make ci`.
+- **Dependencies:** 12.0.
+- **Files likely touched:** `internal/ingest/manualtrade/manualtrade.go` (+ test), `internal/ledger/store.go` (+ test), `internal/web/server.go` (+ `server_test.go`).
+- **Estimated scope:** M.
+
+---
+
+**12.2 — New instrument with explicit classification**
+- Extend `POST /trade`: an instrument not yet in the ledger requires a user-typed key (ISIN or symbol — either accepted, decided 2026-11-06; non-empty after trim only, no lookup, no inference; mixed keys for one security are reconciled with the existing Merge feature, §17) **and** a `classification` of `CGT_ASSET` or `EXIT_TAX_FUND`; both are written together (trade + `classify.Store.Set`). A classification submitted for an already-known instrument is refused, never overwritten.
+- **Acceptance:**
+  - [ ] New instrument + valid classification → `303`, trade present, classification recorded, holding not `UNCLASSIFIED`.
+  - [ ] New instrument without a classification, or with `UNCLASSIFIED`/an unknown value → `400`, nothing written.
+  - [ ] Known instrument + classification → `400`.
+  - [ ] A first-ever trade for a new instrument cannot be a sell (oversell guard).
+- **Verify:**
+  - [ ] `go test ./internal/web/... ./internal/classify/...`; `make ci`.
+- **Dependencies:** 12.1.
+- **Files likely touched:** `internal/web/server.go`, `internal/web/server_test.go`.
+- **Estimated scope:** S.
+
+---
+
+**12.3 — Batch grid**
+- Turn the "Log trade" card into a grid of parallel `kind`/`instrument`/`date`/`quantity`/`price`/`currency` fields with an "Add row" button, mirroring the `/interest` grid (`addInterestRow`). Blank rows skipped; a half-filled row or zero filled rows is a `400` that writes nothing. The oversell guard runs over the whole batch in date order, so a sell may follow a buy entered in the same batch.
+- **Acceptance:**
+  - [ ] A valid 3-row batch inserts three trades; any invalid row → `400`, none written.
+  - [ ] A sell dated before its same-batch buy is rejected; a sell after it is accepted.
+  - [ ] A single filled row behaves exactly as in 12.1/12.2.
+- **Verify:**
+  - [ ] `go test ./internal/web/...`; manual add-row in the browser; `make ci`.
+- **Dependencies:** 12.1, 12.2.
+- **Files likely touched:** `internal/web/server.go`, `internal/web/server_test.go`.
+- **Estimated scope:** S.
+
+---
+
+**Checkpoint 9 — core entry path:** `make ci` green; buy → sell → CGT figure works for a stock and for an ETF (classified); oversell cannot be entered; review with the user before the lifecycle and import work.
+
+---
+
+**12.4 — List, edit and delete manual trades**
+- `ledger.Store`: `ManualTrades()`, `UpdateManualTrade(id, tx)`, `DeleteManualTrade(id)`, each pinned to `platform = manual AND type IN (buy, sell)` so an imported row can never be mutated; fingerprint recomputed on update; collision → `ErrDuplicateManualTrade`. Routes `POST /trade/update` and `POST /trade/delete`; a "Manual trades logged" disclosure list as for interest credits. Update and delete re-run the oversell guard (deleting a buy may strand a later sell; refuse with a message).
+- **Acceptance:**
+  - [ ] An edited trade's fingerprint matches `Transaction.Fingerprint` of the new values.
+  - [ ] An imported row or a manual interest credit cannot be updated or deleted through these paths.
+  - [ ] Deleting a buy that a later sell depends on, or editing so a sell exceeds holdings → refused, nothing changes.
+- **Verify:**
+  - [ ] `go test ./internal/ledger/... ./internal/web/...`; `make ci`.
+- **Dependencies:** 12.1.
+- **Files likely touched:** `internal/ledger/store.go` (+ test), `internal/web/server.go` (+ test).
+- **Estimated scope:** M.
+
+---
+
+**12.5 — Import near-match warning**
+- `ingest.NearMatches(manual []ledger.Transaction, parsed []ledger.Transaction) []string` — flags a parsed row whose alias-resolved instrument, type, date and quantity equal a manual trade's; **price is ignored**. Used by `handleImport` (the existing warnings page) and `taxman import`, including `--dry-run`. Warn only: rows are still inserted by the existing fingerprint rules and nothing is auto-merged or auto-deleted. The message names the manual entry and says to delete it on the dashboard if it is the same trade.
+- **Acceptance:**
+  - [ ] Importing a CSV containing a trade already entered by hand → warning listing both; the import row is still stored.
+  - [ ] Same trade with a different price still warns.
+  - [ ] Different date or quantity → no warning; aliased instrument keys match through the alias map.
+  - [ ] `--dry-run` reports the warning without writing.
+- **Verify:**
+  - [ ] `go test ./internal/ingest/... ./internal/web/...`; manual end-to-end (log a trade, import a fabricated CSV with the same trade); `make ci`.
+- **Dependencies:** 12.4 (the warning points at the delete action).
+- **Files likely touched:** `internal/ingest/route.go` (+ test), `internal/web/server.go`, `cmd/taxman` import command.
+- **Estimated scope:** M.
+
+---
+
+**12.6 — Retire the "Log stock sale" card (confirmed by user 2026-11-06)**
+- `/trade` covers E*TRADE sales. Remove the "Log stock sale" card; keep `handleSale` (and `etrade.NewSale`) so existing `PlatformETRADE` rows and scripted callers keep working, and note the deprecation in SPEC §16. `/rsu` is untouched.
+- **Acceptance:**
+  - [ ] Existing `/sale` tests still pass; the dashboard shows one trade card.
+- **Verify:**
+  - [ ] `go test ./internal/web/...`; `make ci`.
+- **Dependencies:** 12.3.
+- **Files likely touched:** `internal/web/server.go`, `SPEC.md`.
+- **Estimated scope:** XS.
+
+---
+
+**Checkpoint 10 — Phase 12 complete:** `make ci` green; manual smoke (log buy+sell, import a CSV containing the same trade, confirm the warning, delete the manual entry); SPEC §18 matches behaviour; review before merge.
+
+## Risks and mitigations — Phase 12
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Oversell breaks dashboard computation | High | Guard on every write path (12.1, 12.3, 12.4) with tests |
+| Ticker-vs-ISIN key mismatch hides duplicates | High | Holding picker; near-match uses alias resolution; keys are user-entered, never inferred |
+| Near-match misses a duplicate | Med | Price-ignoring match; documented as a heuristic, not a guarantee |
+| Fee scope creep | Med | Explicit non-goal in §18; "fees not included" note on the form |
+
+## Open questions — Phase 12
+
+- ~~Remove the "Log stock sale" card (12.6)?~~ **Resolved: yes**, remove the card, keep the `/sale` handler.
+- ~~New-instrument key: ISIN, ticker, or either?~~ **Resolved: either**, user-entered and never inferred (12.2).
+- Near-match warning at import time only, or persist on the dashboard until resolved?
+- Which TDM section covers allowable acquisition/disposal costs? (Gate for the separate fees feature.)
