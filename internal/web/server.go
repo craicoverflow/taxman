@@ -793,6 +793,16 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An imported trade that looks like one the user already logged by
+	// hand would be counted twice (the fingerprint includes the
+	// platform). Say so; nothing is skipped or deleted (SPEC.md §18).
+	nearMatches, err := ingest.NearMatchWarnings(s.conn, txs)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("checking %s against manual trades: %v", header.Filename, err), http.StatusInternalServerError)
+		return
+	}
+	warnings = append(warnings, nearMatches...)
+
 	inserted, skipped, err := ingest.Store(s.conn, txs)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("storing transactions from %s (platform: %s): %v", header.Filename, resolvedPlatform, err), http.StatusInternalServerError)

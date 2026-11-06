@@ -62,6 +62,12 @@ func runBackfill(args []string) error {
 		}
 		printWarnings(path, warnings)
 
+		nearMatches, err := ingest.NearMatchWarnings(conn, txs)
+		if err != nil {
+			return fmt.Errorf("backfill: checking %s against manual trades: %w", path, err)
+		}
+		printWarnings(path, nearMatches)
+
 		inserted, skipped, err := ingest.Store(conn, txs)
 		if err != nil {
 			return fmt.Errorf("backfill: storing transactions from %s: %w", path, err)

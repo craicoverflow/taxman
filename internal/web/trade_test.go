@@ -882,3 +882,54 @@ func TestHandler_TradeUpdateAndDelete_GET_NotAllowed(t *testing.T) {
 		}
 	}
 }
+
+// --- Import near-match warning (SPEC.md §18) ---
+
+// widgetBuyCSV is a Degiro Account export with one buy of 10 units of
+// IE0000000001 on 2024-03-15 at 85.32.
+const widgetBuyCSV = "Date,Time,Value date,Product,ISIN,Description,FX,Change,,Balance,,Order Id\n" +
+	"15-03-2024,10:32,15-03-2024,WIDGET CORP,IE0000000001,Buy 10 Widget Corp@85.32 EUR (IE0000000001),,EUR,-853.20,EUR,100.00,abc-123\n"
+
+func logWidgetByHand(t *testing.T, conn *sql.DB, qty string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	NewServer(conn).Handler().ServeHTTP(rec, newTradeRequest(map[string]string{
+		"kind": "buy", "new_instrument": "IE0000000001", "classification": "CGT_ASSET",
+		"date": "2024-03-15", "quantity": qty, "price": "85", "currency": "EUR",
+	}))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("logging by hand: status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_Import_POST_WarnsWhenARowMatchesAHandEnteredTrade_AndStillImportsIt(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	logWidgetByHand(t, conn, "10")
+
+	rec := httptest.NewRecorder()
+	NewServer(conn).Handler().ServeHTTP(rec, newUploadRequest(t, []byte(widgetBuyCSV), "account.csv", "degiro"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a warning renders the summary, not a redirect); body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"logged by hand", "IE0000000001", "delete the manual entry"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected the result page to include %q", want)
+		}
+	}
+	if got := countTransactions(t, conn); got != 2 {
+		t.Errorf("transactions = %d, want 2: the near-match is advisory, the import still lands", got)
+	}
+}
+
+func TestHandler_Import_POST_NoMatchingManualTrade_RedirectsWithoutWarning(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	logWidgetByHand(t, conn, "9") // a different quantity: not the same trade
+
+	rec := httptest.NewRecorder()
+	NewServer(conn).Handler().ServeHTTP(rec, newUploadRequest(t, []byte(widgetBuyCSV), "account.csv", "degiro"))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303; body: %s", rec.Code, rec.Body.String())
+	}
+}
