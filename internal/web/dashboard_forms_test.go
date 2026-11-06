@@ -34,7 +34,6 @@ func TestHandler_Dashboard_EachEntryFormKeepsItsOwnInputs(t *testing.T) {
 		fields  []string
 	}{
 		{"<h2>Log RSU vest</h2>", `action="/rsu"`, []string{"symbol", "date", "quantity", "fmv", "currency"}},
-		{"<h2>Log stock sale</h2>", `action="/sale"`, []string{"symbol", "date", "quantity", "price", "currency"}},
 		{"<h2>Log trade</h2>", `action="/trade"`, []string{"kind", "instrument", "new_instrument", "classification", "date", "quantity", "price", "currency"}},
 	}
 	for _, tc := range cases {

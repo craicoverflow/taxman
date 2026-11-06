@@ -1056,7 +1056,7 @@ func (s *Server) handleRSUVest(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// handleSale logs a hand-entered stock sale: POST /sale with "symbol",
+// handleSale logs a hand-entered E*TRADE stock sale: POST /sale with "symbol",
 // "date" (YYYY-MM-DD), "quantity", "price" (sale price per share) and
 // an optional "currency" (defaults to USD) form field. It's for when
 // there's no clean E*TRADE export for a sale either — the disposal-side
@@ -2342,19 +2342,6 @@ function addTradeRow() {
 <button type="submit">Log vest</button>
 </form>
 <p class="muted">The vest is the CGT acquisition event: cost basis is this fair market value, restated to euro at the vest-date rate. Set the holding to <code>CGT_ASSET</code> once it appears below.</p>
-</section>
-
-<section class="card">
-<h2>Log stock sale</h2>
-<form class="form-row" action="/sale" method="post">
-<label>Symbol: <input type="text" name="symbol" placeholder="ACME" required></label>
-<label>Sale date: <input type="date" name="date" required></label>
-<label>Quantity: <input type="text" name="quantity" inputmode="decimal" required></label>
-<label>Price per share: <input type="text" name="price" inputmode="decimal" placeholder="0.00" required></label>
-<label>Currency: <input type="text" name="currency" value="USD" required></label>
-<button type="submit">Log sale</button>
-</form>
-<p class="muted">The sale is matched FIFO against this holding's open lots to compute the CGT gain/loss, which appears in the liability summary below.</p>
 </section>
 
 <section class="card">

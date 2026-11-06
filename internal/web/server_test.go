@@ -1875,13 +1875,20 @@ func TestHandler_Sale_GET_NotAllowed(t *testing.T) {
 	}
 }
 
-func TestHandler_Dashboard_ShowsSaleForm(t *testing.T) {
+// The E*TRADE-only "Log stock sale" card was retired in favour of the
+// general "Log trade" card (SPEC.md §18). POST /sale itself stays — the
+// Sale tests around this one still cover it — so existing rows and any
+// scripted caller keep working.
+func TestHandler_Dashboard_NoLongerShowsTheStockSaleCard(t *testing.T) {
 	conn := openMigratedTestDB(t)
 	body := dashboardBody(t, conn, "/")
-	for _, want := range []string{`action="/sale"`, `name="symbol"`, `name="price"`, `name="quantity"`, `name="currency"`} {
-		if !strings.Contains(body, want) {
-			t.Errorf("expected the dashboard to include the sale form fragment %q", want)
+	for _, gone := range []string{`action="/sale"`, "Log stock sale"} {
+		if strings.Contains(body, gone) {
+			t.Errorf("expected the dashboard to drop the sale card, but it still includes %q", gone)
 		}
+	}
+	if !strings.Contains(body, `action="/trade"`) {
+		t.Error("expected the Log trade card to be there instead")
 	}
 }
 
