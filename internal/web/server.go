@@ -114,10 +114,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/rsu", s.handleRSUVest)
 	mux.HandleFunc("/sale", s.handleSale)
 	mux.HandleFunc("/trade", s.handleTrade)
-	mux.HandleFunc("/portfolio/ticker", s.handlePortfolioTicker)
 	mux.HandleFunc("/trade/update", s.handleTradeUpdate)
 	mux.HandleFunc("/trade/delete", s.handleTradeDelete)
 	mux.HandleFunc("/portfolio", s.handlePortfolio)
+	mux.HandleFunc("/portfolio/ticker", s.handlePortfolioTicker)
 	mux.HandleFunc("/portfolio/merge", s.handlePortfolioMerge)
 	mux.HandleFunc("/portfolio/unmerge", s.handlePortfolioUnmerge)
 	mux.HandleFunc("/static/app.css", s.handleStaticCSS)
@@ -565,7 +565,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chartJS, err := chartDataJS(summary, disposals)
 	// The hand-entered trades, each with its row id so a mistake can be
 	// corrected or removed. Not year-scoped, like the interest credits.
 	storedTrades, err := s.ledgerStore.ManualTrades()
@@ -582,6 +581,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	chartJS, err := chartDataJS(summary, disposals)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("building chart data: %v", err), http.StatusInternalServerError)
 		return
@@ -624,9 +624,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		InterestBatchRows: make([]struct{}, interestBatchRows),
 		TradeHoldings:     tradeHoldings(txs),
 		TradeBatchRows:    make([]struct{}, tradeBatchRows),
-		Years:             years,
 		ManualTrades:      manualTradeRows,
 		ChartDataJS:       chartJS,
+		Years:             years,
 		SelectedYear:      selectedYear,
 	}); err != nil {
 		http.Error(w, fmt.Sprintf("rendering dashboard: %v", err), http.StatusInternalServerError)
@@ -1286,7 +1286,6 @@ func (s *Server) handleTrade(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// page: what remains after FIFO disposals (engine.OpenPositions), the
 // manualTradeRow is one hand-entered trade in the dashboard's "Manual
 // trades logged" list, with its row id for the edit and delete forms.
 type manualTradeRow struct {
@@ -1464,6 +1463,7 @@ func (s *Server) handleTradeDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // portfolioPosition is one currently-held instrument on the portfolio
+// page: what remains after FIFO disposals (engine.OpenPositions), the
 // market symbol mapped to it, and — when a live quote and a EUR rate
 // were both available — its current market value. See SPEC.md §9.
 //
@@ -2106,11 +2106,11 @@ type dashboardData struct {
 	InterestBatchRows []struct{} // blank grid rows to render; only the count matters
 	TradeHoldings     []tradeHolding
 	TradeBatchRows    []struct{} // blank grid rows to render; only the count matters
-	// Years is the tax-year selector's options (descending);
-	// SelectedYear is the active filter, 0 meaning "all years".
 	ManualTrades      []manualTradeRow
 	ChartDataJS       template.JS
 
+	// Years is the tax-year selector's options (descending);
+	// SelectedYear is the active filter, 0 meaning "all years".
 	Years        []int
 	SelectedYear int
 }
@@ -2281,9 +2281,6 @@ function addTradeRow() {
 <p class="muted">Buys and sells are matched FIFO like imported trades and restated to euro at the trade-date rate. A sell larger than what you hold on that date is refused. Fees not included &mdash; taxman does not model them yet, so a trade logged here carries no fee, same as an imported one. Pick an existing holding, or type a new instrument (an ISIN or a ticker) and say how it is taxed &mdash; taxman never guesses that. Leave blank rows empty.</p>
 </section>
 
-<label>Symbol: <input type="text" name="symbol" placeholder="ACME" required></label>
-<label>Vest date: <input type="date" name="date" required></label>
-<label>Quantity: <input type="text" name="quantity" inputmode="decimal" required></label>
 <section class="card">
 <details class="disclosure">
 <summary>Manual trades logged{{if .ManualTrades}} ({{len .ManualTrades}}){{end}}</summary>
@@ -2327,6 +2324,9 @@ function addTradeRow() {
 <section class="card">
 <h2>Log RSU vest</h2>
 <form class="form-row" action="/rsu" method="post">
+<label>Symbol: <input type="text" name="symbol" placeholder="ACME" required></label>
+<label>Vest date: <input type="date" name="date" required></label>
+<label>Quantity: <input type="text" name="quantity" inputmode="decimal" required></label>
 <label>FMV per share: <input type="text" name="fmv" inputmode="decimal" placeholder="0.00" required></label>
 <label>Currency: <input type="text" name="currency" value="USD" required></label>
 <button type="submit">Log vest</button>
