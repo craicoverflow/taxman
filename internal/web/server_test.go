@@ -1875,13 +1875,14 @@ func TestHandler_Sale_GET_NotAllowed(t *testing.T) {
 	}
 }
 
-func TestHandler_Dashboard_ShowsSaleForm(t *testing.T) {
+func TestHandler_Dashboard_HasOneTradeCardAndNoSaleCard(t *testing.T) {
 	conn := openMigratedTestDB(t)
 	body := dashboardBody(t, conn, "/")
-	for _, want := range []string{`action="/sale"`, `name="symbol"`, `name="price"`, `name="quantity"`, `name="currency"`} {
-		if !strings.Contains(body, want) {
-			t.Errorf("expected the dashboard to include the sale form fragment %q", want)
-		}
+	if strings.Contains(body, `action="/sale"`) || strings.Contains(body, "Log stock sale") {
+		t.Error("the \"Log stock sale\" card is retired (SPEC §16/§18); /trade covers sales")
+	}
+	if got := strings.Count(body, `action="/trade"`); got != 1 {
+		t.Errorf("expected exactly one trade form, got %d", got)
 	}
 }
 

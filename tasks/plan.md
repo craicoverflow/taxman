@@ -495,7 +495,7 @@ Dependency order: 12.0 → 12.1 → {12.2, 12.3, 12.4} → 12.5 → 12.6. Never-
 
 ---
 
-**12.6 — Retire the "Log stock sale" card (confirmed by user 2026-11-06)**
+**12.6 — Retire the "Log stock sale" card (confirmed by user 2026-11-06)** ✅ (2026-11-09)
 - `/trade` covers E*TRADE sales. Remove the "Log stock sale" card; keep `handleSale` (and `etrade.NewSale`) so existing `PlatformETRADE` rows and scripted callers keep working, and note the deprecation in SPEC §16. `/rsu` is untouched.
 - **Acceptance:**
   - [ ] Existing `/sale` tests still pass; the dashboard shows one trade card.

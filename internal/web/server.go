@@ -2307,19 +2307,6 @@ function addTradeRow() {
 </section>
 
 <section class="card">
-<h2>Log stock sale</h2>
-<form class="form-row" action="/sale" method="post">
-<label>Symbol: <input type="text" name="symbol" placeholder="ACME" required></label>
-<label>Sale date: <input type="date" name="date" required></label>
-<label>Quantity: <input type="text" name="quantity" inputmode="decimal" required></label>
-<label>Price per share: <input type="text" name="price" inputmode="decimal" placeholder="0.00" required></label>
-<label>Currency: <input type="text" name="currency" value="USD" required></label>
-<button type="submit">Log sale</button>
-</form>
-<p class="muted">The sale is matched FIFO against this holding's open lots to compute the CGT gain/loss, which appears in the liability summary below.</p>
-</section>
-
-<section class="card">
 <details class="disclosure">
 <summary>Manual trades logged{{if .ManualTrades}} ({{len .ManualTrades}}){{end}}</summary>
 <div class="disclosure-body">

@@ -516,7 +516,7 @@ DIRT is DIRT. TCA 1997 s.256 charges it on deposit interest without regard to wh
 
 ## 16. Feature: Manual stock-sale entry
 
-**Status:** built (2026-10-09). Extends §11.
+**Status:** built (2026-10-09). Extends §11. *The dashboard "Log stock sale" card was retired on 2026-11-09 in favour of §18's "Log trade"; `POST /sale` and `etrade.NewSale` remain for existing `PlatformETRADE` rows and scripted callers.*
 
 ### Objective
 §11 added manual entry for the RSU-vest side (the CGT *acquisition*) because E*TRADE's CSV export shape was unverified. The same gap exists on the *disposal* side: there is no clean CSV for a sale either, so a sale of RSU-vested shares currently has no way into the ledger. `internal/ingest/etrade.Parse` already recognizes a `"Sell"` row and produces a `ledger.TypeSell` transaction when a matching CSV exists, but nothing builds that transaction by hand. This adds the direct-entry counterpart to §11's `NewRSUVest`, so a sale reaches the FIFO engine and shows up as a CGT figure the same way an imported one would — no new display surface, the existing dashboard liability summary and `?year=` selector already aggregate whatever `sell` transactions are in the ledger.
@@ -524,7 +524,7 @@ DIRT is DIRT. TCA 1997 s.256 charges it on deposit interest without regard to wh
 ### Shape
 - `internal/ingest/etrade` gains `NewSale(symbol, date, quantity, pricePerShare, currency string) (ledger.Transaction, error)` (`manual.go`) — same validation shape as `NewRSUVest` (symbol/currency non-empty, `date` `YYYY-MM-DD`, quantity/price positive decimals, currency upper-cased), producing `ledger.Transaction{Platform: PlatformETRADE, Type: TypeSell, Instrument: symbol, Quantity: quantity, Price: pricePerShare, Currency: currency}` — the same shape `Parse` builds for a `"Sell"` row.
 - `POST /sale` (`handleSale`) — form fields `symbol`, `date`, `quantity`, `price` (per-share sale price), and `currency` (defaults to `USD`, same rationale as `handleRSUVest`: E*TRADE holdings are US-listed). Validates via `NewSale`, inserts via `ledgerStore.Insert`, `303` to `/` on success, `400` that writes nothing on a bad field, `405` on non-POST — mirrors `handleRSUVest` exactly.
-- A "Log stock sale" card on the dashboard, next to the existing "Log RSU vest" card.
+- ~~A "Log stock sale" card on the dashboard, next to the existing "Log RSU vest" card.~~ Retired (see Status).
 - **No engine change.** `engine.ComputeCGT`'s FIFO matcher already consumes `sell`-type transactions against a holding's open lots regardless of how those lots or the sale entered the ledger; a non-EUR sale is restated to euro at its sale-date ECB rate by the existing `toEURPrices` path, same as a vest. The holding must already be `CGT_ASSET` (confirmed already the case for the ETRADE RSU holding in question) — an unclassified holding still blocks computation per §6, unchanged.
 
 ### Out of scope
@@ -559,7 +559,7 @@ Imports key a holding differently: Degiro and the IBKR flat/Activity layouts by 
 
 ## 18. Feature: Single-trade entry (stock/ETF)
 
-**Status:** in progress (2026-11-06; tasks in `tasks/plan.md` Phase 12, idea doc `docs/ideas/single-trade-entry.md`). Built so far: the `POST /trade` batch grid with holding picker, new-instrument classification and oversell guard (12.1–12.3). Also built: list/edit/delete of manual trades (12.4; the instrument is fixed on edit). Also built: the import near-match warning (12.5, in `taxman import` including `--dry-run`, and the web upload; `taxman backfill` does not warn). Still to build: removing the "Log stock sale" card (12.6) — those parts of **Shape** below are not yet in effect. Supersedes §16's "other platforms" and "batch entry" exclusions for buys and sells.
+**Status:** built (2026-11-09; started 2026-11-06; tasks in `tasks/plan.md` Phase 12, idea doc `docs/ideas/single-trade-entry.md`). Built: the `POST /trade` batch grid with holding picker, new-instrument classification and oversell guard (12.1–12.3). Also built: list/edit/delete of manual trades (12.4; the instrument is fixed on edit), the the import near-match warning (12.5, in `taxman import` including `--dry-run`, and the web upload; `taxman backfill` does not warn) and removal of the "Log stock sale" card (12.6). Supersedes §16's "other platforms" and "batch entry" exclusions for buys and sells.
 
 ### Objective
 Today a trade reaches the ledger only by CSV import, apart from E*TRADE RSU vests (§11) and sales (§16), which are hand-entered. There is no manual **buy**, and an ETF cannot be entered by hand at all: §16's form takes a bare symbol and is hard-wired to `PlatformETRADE`. This adds one buy/sell entry path for any stock or ETF, for the quick top-up between exports. CSV import stays first-class and unchanged; both paths are supported.
