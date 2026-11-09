@@ -446,6 +446,48 @@ td strong {
 	inset: 0;
 }
 
+/* ---- holdings map (treemap) ------------------------------------------ */
+
+.treemap {
+	position: relative;
+	width: 100%;
+	aspect-ratio: 2 / 1; /* matches treemapW:treemapH in treemap.go */
+}
+
+.tm-tile {
+	position: absolute;
+	box-sizing: border-box;
+	border: 2px solid var(--surface);
+	border-radius: 4px;
+	overflow: hidden;
+	padding: 6px 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	color: var(--text);
+	background: var(--surface-2);
+}
+
+.tm-tile.tm-pos {
+	background: color-mix(in srgb, var(--pos) var(--mix), var(--surface-2));
+}
+
+.tm-tile.tm-neg {
+	background: color-mix(in srgb, var(--neg) var(--mix), var(--surface-2));
+}
+
+.tm-label {
+	font-weight: 600;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.tm-pct {
+	font-size: 0.85em;
+	font-variant-numeric: tabular-nums;
+}
+
 /* ---- audit trail --------------------------------------------- */
 
 .audit-list {

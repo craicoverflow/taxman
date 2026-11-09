@@ -1323,6 +1323,7 @@ type portfolioData struct {
 	AnyStale   bool
 
 	ChartDataJS template.JS
+	Treemap     []treemapTile // SPEC §19 holdings map over Priced
 
 	// Instruments are the keys the merge form offers; Merges are the
 	// user-entered alias → canonical entries already on record.
@@ -1483,6 +1484,7 @@ func (s *Server) handlePortfolio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data.ChartDataJS = chartJS
+	data.Treemap = buildTreemap(data.Priced)
 
 	if err := portfolioTemplate.Execute(w, data); err != nil {
 		http.Error(w, fmt.Sprintf("rendering portfolio: %v", err), http.StatusInternalServerError)
@@ -2250,6 +2252,16 @@ Total market value: <strong>{{eur .TotalValue}}</strong>
 </section>
 
 {{if .Priced}}
+{{if .Treemap}}
+<section class="card">
+<h2>Holdings map</h2>
+<p class="muted">Area is market value; colour is gain or loss against cost (full colour at &plusmn;30%).</p>
+<div class="treemap" role="list">
+{{range .Treemap}}<div class="tm-tile {{.Class}}" role="listitem" title="{{.Title}}" style="{{.Style}}">{{if .Label}}<span class="tm-label">{{.Label}}</span>{{with .Pct}}<span class="money tm-pct">{{.}}</span>{{end}}{{end}}</div>
+{{end}}</div>
+</section>
+{{end}}
+
 <section class="card">
 <h2>Allocation by market value</h2>
 <div class="chart-card"><canvas id="portfolio-pie"></canvas></div>

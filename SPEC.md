@@ -592,6 +592,32 @@ Today a trade reaches the ledger only by CSV import, apart from E*TRADE RSU vest
 
 ---
 
+## 19. Feature: Portfolio treemap
+
+**Status:** built (2026-11-06). Idea refined with the user; extends §9 and §13.
+
+### Objective
+The pie (§9) shows where value sits and the P&L column (§13) shows who is winning, but not in one picture. A Finviz-style treemap puts both in a single glance over the holdings.
+
+### Shape
+- A "Holdings map" card on `/portfolio`, above the allocation pie. **Not on the tax dashboard (`/`)** — §6 keeps market value off it.
+- One tile per **priced** holding (the same set as the pie, bars and totals). Tile **area** is euro market value; tile **colour** is unrealised P&L % vs FIFO cost (§13): green for gain, red for loss, neutral grey at zero or when cost basis is zero. Intensity scales linearly with |P&L %| and saturates at 30%.
+- Flat: no sector or regime grouping. Sector data does not exist and tickers are user-entered (§6).
+- Layout is the squarified treemap algorithm, computed server-side in `internal/web/treemap.go` and emitted as percentage-positioned `div`s. No new JavaScript, CDN dependency or build step.
+- Each tile shows the symbol (else the instrument label) and the signed P&L %. The label is omitted on tiles too small to hold it; the tile `title` still names the holding. The P&L % carries the `money` class so the §12 privacy toggle blurs it. Stale quotes are marked in the tile title.
+- Tiles are geometry and presentation only. All figures come from values `handlePortfolio` already computed; nothing is persisted, and no tax figure appears.
+
+### Out of scope
+- Daily/weekly change colouring: `prices.Quote` has no previous close.
+- Sector, tag or tax-regime grouping; drill-down; animation.
+- Any change to `engine`, `taxrules`, `audit` or `prices`, and no new golden fixture or `features/` scenario.
+
+### Testing strategy
+- `treemap_test.go`: table-driven layout tests (areas proportional to values, tiles inside the container and non-overlapping, input order preserved, zero/negative values skipped, empty input).
+- Handler test: a gain and a loss holding render tiles with the expected labels, signed percentages and colour direction; no tiles when nothing is priced.
+
+---
+
 ## Traceability
 
 | Idea doc item | Resolved here |
