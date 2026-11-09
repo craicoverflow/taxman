@@ -4,11 +4,13 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"os"
 
 	_ "modernc.org/sqlite"
 
 	"github.com/craicoverflow/taxman/internal/db"
 	"github.com/craicoverflow/taxman/internal/ingest"
+	"github.com/craicoverflow/taxman/internal/ledger"
 )
 
 // runImport implements `taxman import <file> [--platform p] [--db path] [--dry-run]`.
@@ -34,6 +36,14 @@ func runImport(args []string) error {
 	printWarnings(file, warnings)
 
 	if *dryRun {
+		// Read-only: look for hand-entered duplicates only if a database
+		// already exists, and never create or migrate one.
+		if _, statErr := os.Stat(*dbPath); statErr == nil {
+			if conn, openErr := sql.Open("sqlite", *dbPath); openErr == nil {
+				printNearMatches(file, conn, txs)
+				_ = conn.Close()
+			}
+		}
 		fmt.Printf("dry run: would import %d transaction(s) from %s (platform: %s)\n", len(txs), file, resolvedPlatform)
 		return nil
 	}
@@ -48,6 +58,8 @@ func runImport(args []string) error {
 		return fmt.Errorf("ensuring schema is up to date: %w", err)
 	}
 
+	printNearMatches(file, conn, txs)
+
 	inserted, skipped, err := ingest.Store(conn, txs)
 	if err != nil {
 		return fmt.Errorf("storing transactions from %s: %w", file, err)
@@ -55,6 +67,18 @@ func runImport(args []string) error {
 
 	fmt.Printf("imported %s (platform: %s): %d new, %d already present\n", file, resolvedPlatform, inserted, skipped)
 	return nil
+}
+
+// printNearMatches warns of parsed trades that match one already
+// entered by hand (SPEC.md §18). Advisory: it never stops the import,
+// and a failure to check is itself only a warning.
+func printNearMatches(file string, conn *sql.DB, txs []ledger.Transaction) {
+	warnings, err := ingest.NearMatchWarnings(conn, txs)
+	if err != nil {
+		printWarnings(file, []string{fmt.Sprintf("could not check for trades entered by hand: %v", err)})
+		return
+	}
+	printWarnings(file, warnings)
 }
 
 // printWarnings reports non-fatal warnings from parsing file (e.g.

@@ -69,3 +69,15 @@ SPEC.md §9. PR split: 11.1–11.3 plumbing, 11.4–11.6 page.
 - [x] 11.5 Wire live prices + EUR into /portfolio; allocation pie + cost-vs-value bars
 - [x] 11.6 Dashboard nav link + online/offline smoke + README note
 - [ ] **CHECKPOINT 8** — portfolio page complete; review
+
+## Phase 12 — Single-trade entry (stock/ETF)
+SPEC.md §18 (to be written in 12.0), `docs/ideas/single-trade-entry.md`. No engine/taxrules change. Fees are out of scope.
+- [x] 12.0 SPEC §18: single-trade entry (supersedes §16 scope notes)
+- [x] 12.1 `POST /trade`: log one buy/sell on an existing holding, `PlatformManual`, oversell guard
+- [x] 12.2 New instrument with explicit user-entered classification
+- [x] 12.3 Batch grid (all-or-nothing, mirrors `/interest`)
+- [ ] **CHECKPOINT 9** — core entry path; review before lifecycle/import work
+- [ ] 12.4 List, edit, delete manual trades (oversell guard on edit/delete)
+- [ ] 12.5 Import near-match warning (ignores price; warn only)
+- [ ] 12.6 Retire "Log stock sale" card (confirmed; keep `/sale` handler)
+- [ ] **CHECKPOINT 10** — Phase 12 complete; review

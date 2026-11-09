@@ -82,19 +82,48 @@ type StoredInterestCredit struct {
 // are the only transactions taxman lets the user edit or delete — see
 // ErrNotManualInterest.
 func (s *Store) ManualInterestCredits() ([]StoredInterestCredit, error) {
-	rows, err := s.db.Query(
-		`SELECT id, platform, type, date, instrument, quantity, price, currency, source_ref, description
-		 FROM transactions
-		 WHERE platform = ? AND type = ?
-		 ORDER BY date DESC, id DESC`,
-		string(PlatformManual), string(TypeInterest),
-	)
+	rows, err := s.queryManual(TypeInterest)
 	if err != nil {
 		return nil, fmt.Errorf("querying interest credits: %w", err)
 	}
+	out := make([]StoredInterestCredit, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, StoredInterestCredit(r))
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// storedManual is a hand-entered row with its id; queryManual's result.
+type storedManual struct {
+	ID int64
+	Transaction
+}
+
+// queryManual returns every PlatformManual row of the given types,
+// most recent first (date descending, then id descending), each with
+// its row id.
+func (s *Store) queryManual(types ...Type) ([]storedManual, error) {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(types)), ",")
+	args := []any{string(PlatformManual)}
+	for _, typ := range types {
+		args = append(args, string(typ))
+	}
+	rows, err := s.db.Query(
+		`SELECT id, platform, type, date, instrument, quantity, price, currency, source_ref, description
+		 FROM transactions
+		 WHERE platform = ? AND type IN (`+placeholders+`)
+		 ORDER BY date DESC, id DESC`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
 	defer func() { _ = rows.Close() }()
 
-	var out []StoredInterestCredit
+	var out []storedManual
 	for rows.Next() {
 		var (
 			id                                 int64
@@ -103,9 +132,8 @@ func (s *Store) ManualInterestCredits() ([]StoredInterestCredit, error) {
 			sourceRef, description             string
 		)
 		if err := rows.Scan(&id, &platform, &typ, &dateStr, &instrument, &quantityStr, &priceStr, &currency, &sourceRef, &description); err != nil {
-			return nil, fmt.Errorf("scanning interest credit: %w", err)
+			return nil, fmt.Errorf("scanning row: %w", err)
 		}
-
 		date, err := time.Parse(time.RFC3339, dateStr)
 		if err != nil {
 			return nil, fmt.Errorf("parsing stored date %q: %w", dateStr, err)
@@ -118,8 +146,7 @@ func (s *Store) ManualInterestCredits() ([]StoredInterestCredit, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parsing stored price %q: %w", priceStr, err)
 		}
-
-		out = append(out, StoredInterestCredit{
+		out = append(out, storedManual{
 			ID: id,
 			Transaction: Transaction{
 				Platform:    Platform(platform),

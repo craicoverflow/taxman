@@ -26,6 +26,7 @@ import (
 	"github.com/craicoverflow/taxman/internal/ingest"
 	"github.com/craicoverflow/taxman/internal/ingest/etrade"
 	"github.com/craicoverflow/taxman/internal/ingest/interest"
+	"github.com/craicoverflow/taxman/internal/ingest/manualtrade"
 	"github.com/craicoverflow/taxman/internal/ledger"
 	"github.com/craicoverflow/taxman/internal/prices"
 	"github.com/craicoverflow/taxman/internal/tickers"
@@ -113,6 +114,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/rsu", s.handleRSUVest)
 	mux.HandleFunc("/sale", s.handleSale)
 	mux.HandleFunc("/portfolio", s.handlePortfolio)
+	mux.HandleFunc("/trade", s.handleTrade)
+	mux.HandleFunc("/trade/update", s.handleTradeUpdate)
+	mux.HandleFunc("/trade/delete", s.handleTradeDelete)
 	mux.HandleFunc("/portfolio/ticker", s.handlePortfolioTicker)
 	mux.HandleFunc("/portfolio/merge", s.handlePortfolioMerge)
 	mux.HandleFunc("/portfolio/unmerge", s.handlePortfolioUnmerge)
@@ -561,6 +565,24 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	storedTrades, err := s.ledgerStore.ManualTrades()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("loading manual trades: %v", err), http.StatusInternalServerError)
+		return
+	}
+	manualTrades := make([]manualTradeRow, 0, len(storedTrades))
+	for _, t := range storedTrades {
+		manualTrades = append(manualTrades, manualTradeRow{
+			ID:         t.ID,
+			Kind:       string(t.Type),
+			Instrument: t.Instrument,
+			Date:       t.Date.Format("2006-01-02"),
+			Quantity:   t.Quantity.String(),
+			Price:      t.Price.String(),
+			Currency:   t.Currency,
+		})
+	}
+
 	chartJS, err := chartDataJS(summary, disposals)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("building chart data: %v", err), http.StatusInternalServerError)
@@ -603,6 +625,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		InterestSources:   interestSources,
 		InterestBatchRows: make([]struct{}, interestBatchRows),
 		ChartDataJS:       chartJS,
+		TradeHoldings:     tradeHoldings(txs),
+		TradeBatchRows:    make([]struct{}, tradeBatchRows),
+		ManualTrades:      manualTrades,
 		Years:             years,
 		SelectedYear:      selectedYear,
 	}); err != nil {
@@ -768,6 +793,14 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	// Warn (never block) when a parsed trade matches one already entered
+	// by hand, which the fingerprint cannot dedupe (SPEC.md §18).
+	if nearMatches, err := ingest.NearMatchWarnings(s.conn, txs); err != nil {
+		warnings = append(warnings, fmt.Sprintf("could not check for trades entered by hand: %v", err))
+	} else {
+		warnings = append(warnings, nearMatches...)
 	}
 
 	inserted, skipped, err := ingest.Store(s.conn, txs)
@@ -1069,7 +1102,377 @@ func (s *Server) handleSale(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// manualTradeRow is one hand-entered buy or sell listed on the
+// dashboard, with its row id so the edit and delete forms can target
+// it. Instrument is shown but not editable.
+type manualTradeRow struct {
+	ID         int64
+	Kind       string // "buy" or "sell"
+	Instrument string
+	Date       string // YYYY-MM-DD
+	Quantity   string
+	Price      string
+	Currency   string
+}
+
+// resolveAlias returns tx with its Instrument alias-resolved, the form
+// ledger.Store.All hands the engine and the oversell guard.
+func resolveAlias(tx ledger.Transaction, aliasMap map[string]string) ledger.Transaction {
+	if canonical, ok := aliasMap[tx.Instrument]; ok {
+		tx.Instrument = canonical
+	}
+	return tx
+}
+
+// parseTradeID reads the "id" form field of /trade/update and
+// /trade/delete.
+func parseTradeID(r *http.Request) (int64, error) {
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("invalid id %q", r.FormValue("id"))
+	}
+	return id, nil
+}
+
+// findManualTrade returns the hand-entered trade with the given row id,
+// ok false when there is none (an imported row is never a match).
+func (s *Server) findManualTrade(id int64) (trade ledger.StoredTrade, ok bool, err error) {
+	trades, err := s.ledgerStore.ManualTrades()
+	if err != nil {
+		return ledger.StoredTrade{}, false, err
+	}
+	for _, t := range trades {
+		if t.ID == id {
+			return t, true, nil
+		}
+	}
+	return ledger.StoredTrade{}, false, nil
+}
+
+// handleTradeUpdate corrects a hand-entered trade: POST /trade/update
+// with an `id` and the `kind`, `date`, `quantity`, `price` and
+// `currency` fields /trade takes. The instrument is fixed: to move a
+// trade to another holding, delete it and log it again. The fingerprint
+// is recomputed. An id that isn't a manual trade is a 404, a correction
+// that duplicates another stored transaction a 409, and a validation
+// failure or one that would leave any sell larger than the quantity
+// held at its date a 400 that changes nothing. See SPEC.md §18.
+func (s *Server) handleTradeUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parsing form: %v", err), http.StatusBadRequest)
+		return
+	}
+	id, err := parseTradeID(r)
+	if err != nil {
+		http.Error(w, "trade: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	stored, found, err := s.findManualTrade(id)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading trades: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.Error(w, "trade: no such manual trade", http.StatusNotFound)
+		return
+	}
+
+	tx, err := manualtrade.NewTrade(r.FormValue("kind"), stored.Instrument,
+		r.FormValue("date"), r.FormValue("quantity"), r.FormValue("price"), r.FormValue("currency"))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	existing, aliasMap, err := s.ledgerAndAliases()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: %v", err), http.StatusInternalServerError)
+		return
+	}
+	without := manualtrade.Remove(existing, resolveAlias(stored.Transaction, aliasMap))
+	if err := manualtrade.CheckNoOversell(without, []ledger.Transaction{resolveAlias(tx, aliasMap)}); err != nil {
+		http.Error(w, fmt.Sprintf("trade: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	switch err := s.ledgerStore.UpdateManualTrade(id, tx); {
+	case errors.Is(err, ledger.ErrNotManualTrade):
+		http.Error(w, "trade: no such manual trade", http.StatusNotFound)
+		return
+	case errors.Is(err, ledger.ErrDuplicateManualTrade):
+		http.Error(w, "trade: a trade with those values already exists", http.StatusConflict)
+		return
+	case err != nil:
+		http.Error(w, fmt.Sprintf("trade: updating: %v", err), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// handleTradeDelete removes a hand-entered trade: POST /trade/delete
+// with an `id`. An id that isn't a manual trade is a 404. Deleting a buy
+// that a later sell depends on is a 400 that deletes nothing.
+func (s *Server) handleTradeDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parsing form: %v", err), http.StatusBadRequest)
+		return
+	}
+	id, err := parseTradeID(r)
+	if err != nil {
+		http.Error(w, "trade: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	stored, found, err := s.findManualTrade(id)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading trades: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.Error(w, "trade: no such manual trade", http.StatusNotFound)
+		return
+	}
+
+	existing, aliasMap, err := s.ledgerAndAliases()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: %v", err), http.StatusInternalServerError)
+		return
+	}
+	target := resolveAlias(stored.Transaction, aliasMap)
+	if err := manualtrade.CheckHoldings(manualtrade.Remove(existing, target), target.Instrument); err != nil {
+		http.Error(w, fmt.Sprintf("trade: deleting this would break a later sale: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	switch err := s.ledgerStore.DeleteManualTrade(id); {
+	case errors.Is(err, ledger.ErrNotManualTrade):
+		http.Error(w, "trade: no such manual trade", http.StatusNotFound)
+		return
+	case err != nil:
+		http.Error(w, fmt.Sprintf("trade: deleting: %v", err), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// ledgerAndAliases loads every transaction (alias-resolved) and the
+// alias map, the two inputs the oversell guard needs.
+func (s *Server) ledgerAndAliases() ([]ledger.Transaction, map[string]string, error) {
+	existing, err := s.ledgerStore.All()
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading ledger: %w", err)
+	}
+	aliasMap, err := s.aliasStore.All()
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading aliases: %w", err)
+	}
+	return existing, aliasMap, nil
+}
+
 // portfolioPosition is one currently-held instrument on the portfolio
+// tradeHolding is one option in the "Log trade" card's holding picker:
+// an instrument that already has buys, sells or vests in the ledger.
+type tradeHolding struct {
+	Key   string
+	Label string
+}
+
+// tradeHoldings lists the instruments a manual trade may be logged
+// against: those with at least one buy, sell or RSU vest. A savings
+// account that only has interest credits is not a holding. txs come
+// from ledger.Store.All, so keys are alias-resolved (SPEC.md §17).
+func tradeHoldings(txs []ledger.Transaction) []tradeHolding {
+	labels := map[string]string{}
+	for _, tx := range txs {
+		switch tx.Type {
+		case ledger.TypeBuy, ledger.TypeSell, ledger.TypeRSUVest:
+			if tx.Description != "" || labels[tx.Instrument] == "" {
+				labels[tx.Instrument] = tx.Description
+			}
+		}
+	}
+	out := make([]tradeHolding, 0, len(labels))
+	for key, desc := range labels {
+		label := key
+		if desc != "" {
+			label = desc + " (" + key + ")"
+		}
+		out = append(out, tradeHolding{Key: key, Label: label})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
+}
+
+// tradeBatchRows is how many blank rows the "Log trade" grid starts
+// with; the "Add row" button clones more. One row is the common case.
+const tradeBatchRows = 1
+
+// formAt returns the i-th value of a repeated form field, trimmed, or
+// "" when the field has fewer values (a client that omits a column).
+func formAt(values []string, i int) string {
+	if i < len(values) {
+		return strings.TrimSpace(values[i])
+	}
+	return ""
+}
+
+// handleTrade logs hand-entered stock or ETF buys and sells: POST /trade
+// with parallel "kind" (buy|sell), "instrument" (a holding picked from
+// the list), "new_instrument" (an ISIN or ticker typed in), "classification",
+// "date" (YYYY-MM-DD), "quantity", "price" (per unit, in "currency") and
+// "currency" fields, one value per grid row, like /interest.
+//
+// Each trade is stored on ledger.PlatformManual and consumed by
+// internal/engine's FIFO matcher exactly as an imported one would be,
+// restated to euro at the trade-date rate (never here). Currency is
+// required and never defaulted.
+//
+// An instrument that is not yet a holding must be typed in with an
+// explicit CGT_ASSET or EXIT_TAX_FUND classification, recorded with the
+// trade and never guessed; a known holding must not carry one (it would
+// overwrite the user's earlier choice). For a new instrument any one of
+// its rows in the batch may carry the classification, in any order, but
+// those that do must agree. A sell larger than
+// the quantity held at its date, counting the whole batch in date order,
+// is refused: the engine treats that as a hard error that would break
+// computation for the whole dashboard.
+//
+// The batch is all-or-nothing on validation: blank rows are skipped, but
+// one invalid row, or no filled row at all, is a 400 that writes nothing.
+// Valid trades are then inserted row by row. See SPEC.md §18.
+func (s *Server) handleTrade(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parsing form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	existing, err := s.ledgerStore.All()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading ledger: %v", err), http.StatusInternalServerError)
+		return
+	}
+	known := map[string]bool{}
+	for _, h := range tradeHoldings(existing) {
+		known[h.Key] = true
+	}
+	aliasMap, err := s.aliasStore.All()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading aliases: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	f := r.PostForm
+	rows := 0
+	for _, name := range []string{"kind", "instrument", "new_instrument", "classification", "date", "quantity", "price", "currency"} {
+		rows = max(rows, len(f[name]))
+	}
+
+	var trades []ledger.Transaction
+	introduced := map[string]classify.Classification{} // classification given for each new instrument
+	newInstrumentRow := map[string]int{}               // first row that mentions each new instrument
+	for i := 0; i < rows; i++ {
+		// A new instrument is typed into new_instrument and wins over
+		// the picker, which only lists holdings already in the ledger.
+		instrument := formAt(f["new_instrument"], i)
+		if instrument == "" {
+			instrument = formAt(f["instrument"], i)
+		}
+		date, quantity, price, currency := formAt(f["date"], i), formAt(f["quantity"], i), formAt(f["price"], i), formAt(f["currency"], i)
+		if instrument == "" && date == "" && quantity == "" && price == "" && currency == "" {
+			continue // untouched grid row (kind and classification have defaults)
+		}
+
+		tx, err := manualtrade.NewTrade(formAt(f["kind"], i), instrument, date, quantity, price, currency)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("trade: row %d: %v", i+1, err), http.StatusBadRequest)
+			return
+		}
+
+		// The classification is the user's statement about a holding's
+		// tax treatment and is never guessed.
+		classificationArg := formAt(f["classification"], i)
+		if known[tx.Instrument] {
+			if classificationArg != "" {
+				http.Error(w, fmt.Sprintf("trade: row %d: %q is already a holding; leave classification blank (change it on the classification form)", i+1, tx.Instrument), http.StatusBadRequest)
+				return
+			}
+		} else {
+			if canonical, isAlias := aliasMap[tx.Instrument]; isAlias {
+				http.Error(w, fmt.Sprintf("trade: row %d: %q is merged into %q; log the trade against %q", i+1, tx.Instrument, canonical, canonical), http.StatusBadRequest)
+				return
+			}
+			if _, seen := newInstrumentRow[tx.Instrument]; !seen {
+				newInstrumentRow[tx.Instrument] = i + 1
+			}
+			// Any row of a new instrument may carry its classification
+			// (so row order doesn't matter), but all that do must agree.
+			if classificationArg != "" {
+				c, ok := classify.ValidClassifications[classificationArg]
+				if !ok {
+					http.Error(w, fmt.Sprintf("trade: row %d: invalid classification %q (expected CGT_ASSET or EXIT_TAX_FUND)", i+1, classificationArg), http.StatusBadRequest)
+					return
+				}
+				if prior, set := introduced[tx.Instrument]; set && prior != c {
+					http.Error(w, fmt.Sprintf("trade: row %d: %q is given classification %s here but %s in another row", i+1, tx.Instrument, c, prior), http.StatusBadRequest)
+					return
+				}
+				introduced[tx.Instrument] = c
+			}
+		}
+
+		trades = append(trades, tx)
+	}
+	if len(trades) == 0 {
+		http.Error(w, "trade: no trades to log", http.StatusBadRequest)
+		return
+	}
+	for instrument, row := range newInstrumentRow {
+		if _, ok := introduced[instrument]; !ok {
+			http.Error(w, fmt.Sprintf("trade: row %d: %q is not a holding in the ledger yet; choose its classification (CGT_ASSET or EXIT_TAX_FUND)", row, instrument), http.StatusBadRequest)
+			return
+		}
+	}
+
+	if err := manualtrade.CheckNoOversell(existing, trades); err != nil {
+		http.Error(w, fmt.Sprintf("trade: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Classifications first: a leftover entry for an instrument with no
+	// transactions is inert, whereas a trade with no classification
+	// would block that holding's computation.
+	for instrument, c := range introduced {
+		if err := s.classifyStore.Set(instrument, c); err != nil {
+			http.Error(w, fmt.Sprintf("trade: classifying %s: %v", instrument, err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	for _, tx := range trades {
+		if _, err := s.ledgerStore.Insert(tx); err != nil {
+			http.Error(w, fmt.Sprintf("trade: inserting: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 // page: what remains after FIFO disposals (engine.OpenPositions), the
 // market symbol mapped to it, and — when a live quote and a EUR rate
 // were both available — its current market value. See SPEC.md §9.
@@ -1125,6 +1528,7 @@ type portfolioData struct {
 	AnyStale   bool
 
 	ChartDataJS template.JS
+	Treemap     []treemapTile // SPEC §19 holdings map over Priced
 
 	// Instruments are the keys the merge form offers; Merges are the
 	// user-entered alias → canonical entries already on record.
@@ -1285,6 +1689,7 @@ func (s *Server) handlePortfolio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data.ChartDataJS = chartJS
+	data.Treemap = buildTreemap(data.Priced)
 
 	if err := portfolioTemplate.Execute(w, data); err != nil {
 		http.Error(w, fmt.Sprintf("rendering portfolio: %v", err), http.StatusInternalServerError)
@@ -1713,6 +2118,9 @@ type dashboardData struct {
 	InterestBatchRows []struct{} // blank grid rows to render; only the count matters
 	ChartDataJS       template.JS
 
+	TradeHoldings  []tradeHolding
+	TradeBatchRows []struct{} // blank grid rows to render; only the count matters
+	ManualTrades   []manualTradeRow
 	// Years is the tax-year selector's options (descending);
 	// SelectedYear is the active filter, 0 meaning "all years".
 	Years        []int
@@ -1853,6 +2261,41 @@ function addInterestRow() {
 <section class="card">
 <h2>Log RSU vest</h2>
 <form class="form-row" action="/rsu" method="post">
+<section class="card">
+<h2>Log trade</h2>
+<form action="/trade" method="post">
+<table class="data" id="trade-batch">
+<thead><tr><th>Type</th><th>Holding</th><th>or new instrument</th><th>Classification (new only)</th><th>Date</th><th>Quantity</th><th>Price per unit</th><th>Currency</th></tr></thead>
+<tbody>
+{{range .TradeBatchRows}}<tr>
+<td><select name="kind"><option value="buy">Buy</option><option value="sell">Sell</option></select></td>
+<td><select name="instrument"><option value="">&mdash;</option>{{range $.TradeHoldings}}<option value="{{.Key}}">{{.Label}}</option>{{end}}</select></td>
+<td><input type="text" name="new_instrument" placeholder="ISIN or ticker"></td>
+<td><select name="classification"><option value="">&mdash;</option><option value="CGT_ASSET">CGT_ASSET</option><option value="EXIT_TAX_FUND">EXIT_TAX_FUND</option></select></td>
+<td><input type="date" name="date"></td>
+<td><input type="text" name="quantity" inputmode="decimal"></td>
+<td><input type="text" name="price" inputmode="decimal" placeholder="0.00"></td>
+<td><input type="text" name="currency" placeholder="EUR"></td>
+</tr>
+{{end}}</tbody>
+</table>
+<div class="form-row">
+<button type="button" onclick="addTradeRow()">Add row</button>
+<button type="submit">Log trades</button>
+</div>
+</form>
+<script>
+function addTradeRow() {
+	var body = document.querySelector('#trade-batch tbody');
+	var row = body.rows[0].cloneNode(true);
+	row.querySelectorAll('input').forEach(function (input) { input.value = ''; });
+	row.querySelectorAll('select').forEach(function (select) { select.selectedIndex = 0; });
+	body.appendChild(row);
+}
+</script>
+<p class="muted">Buys and sells are matched FIFO like imported trades and restated to euro at the trade-date rate. A sell larger than what you hold on that date is refused. Fees not included &mdash; taxman does not model them yet, so a trade logged here carries no fee, same as an imported one. Pick an existing holding, or type a new instrument (an ISIN or a ticker) and say how it is taxed &mdash; taxman never guesses that. Leave blank rows empty.</p>
+</section>
+
 <label>Symbol: <input type="text" name="symbol" placeholder="ACME" required></label>
 <label>Vest date: <input type="date" name="date" required></label>
 <label>Quantity: <input type="text" name="quantity" inputmode="decimal" required></label>
@@ -1864,16 +2307,43 @@ function addInterestRow() {
 </section>
 
 <section class="card">
-<h2>Log stock sale</h2>
-<form class="form-row" action="/sale" method="post">
-<label>Symbol: <input type="text" name="symbol" placeholder="ACME" required></label>
-<label>Sale date: <input type="date" name="date" required></label>
-<label>Quantity: <input type="text" name="quantity" inputmode="decimal" required></label>
-<label>Price per share: <input type="text" name="price" inputmode="decimal" placeholder="0.00" required></label>
-<label>Currency: <input type="text" name="currency" value="USD" required></label>
-<button type="submit">Log sale</button>
+<details class="disclosure">
+<summary>Manual trades logged{{if .ManualTrades}} ({{len .ManualTrades}}){{end}}</summary>
+<div class="disclosure-body">
+{{if .ManualTrades}}
+<table class="data">
+<thead><tr><th>Instrument</th><th>Kind</th><th>Date</th><th>Quantity</th><th>Price</th><th>Currency</th><th></th><th></th></tr></thead>
+<tbody>
+{{range .ManualTrades}}
+<tr>
+<td><span class="sensitive">{{.Instrument}}</span></td>
+<td><select form="mt-{{.ID}}" name="kind"><option value="buy"{{if eq .Kind "buy"}} selected{{end}}>Buy</option><option value="sell"{{if eq .Kind "sell"}} selected{{end}}>Sell</option></select></td>
+<td><input form="mt-{{.ID}}" type="date" name="date" value="{{.Date}}" required></td>
+<td><input form="mt-{{.ID}}" class="sensitive" type="text" name="quantity" inputmode="decimal" value="{{.Quantity}}" required></td>
+<td><input form="mt-{{.ID}}" class="money" type="text" name="price" inputmode="decimal" value="{{.Price}}" required></td>
+<td><input form="mt-{{.ID}}" type="text" name="currency" value="{{.Currency}}" size="4" required></td>
+<td>
+<form id="mt-{{.ID}}" action="/trade/update" method="post">
+<input type="hidden" name="id" value="{{.ID}}">
+<button type="submit">Save</button>
 </form>
-<p class="muted">The sale is matched FIFO against this holding's open lots to compute the CGT gain/loss, which appears in the liability summary below.</p>
+</td>
+<td>
+<form action="/trade/delete" method="post" onsubmit="return confirm('Delete this trade?')">
+<input type="hidden" name="id" value="{{.ID}}">
+<button type="submit">Delete</button>
+</form>
+</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+<p class="muted">Only trades typed in here can be edited or deleted; imported rows are never changed. A change that would leave a sale larger than the quantity held is refused.</p>
+{{else}}
+<p>No manual trades logged yet.</p>
+{{end}}
+</div>
+</details>
 </section>
 
 <section class="card">
@@ -2015,6 +2485,16 @@ Total market value: <strong>{{eur .TotalValue}}</strong>
 </section>
 
 {{if .Priced}}
+{{if .Treemap}}
+<section class="card">
+<h2>Holdings map</h2>
+<p class="muted">Area is market value; colour is gain or loss against cost (full colour at &plusmn;30%).</p>
+<div class="treemap" role="list">
+{{range .Treemap}}<div class="tm-tile {{.Class}}" role="listitem" title="{{.Title}}" style="{{.Style}}">{{if .Label}}<span class="tm-label">{{.Label}}</span>{{with .Pct}}<span class="money tm-pct">{{.}}</span>{{end}}{{end}}</div>
+{{end}}</div>
+</section>
+{{end}}
+
 <section class="card">
 <h2>Allocation by market value</h2>
 <div class="chart-card"><canvas id="portfolio-pie"></canvas></div>
