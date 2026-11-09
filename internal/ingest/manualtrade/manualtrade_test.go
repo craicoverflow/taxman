@@ -175,3 +175,44 @@ func TestCheckNoOversell(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckHoldings_ChecksNamedInstrumentsOnly(t *testing.T) {
+	txs := []ledger.Transaction{
+		tx(t, ledger.TypeBuy, "A", "2024-01-01", "5"),
+		tx(t, ledger.TypeSell, "A", "2024-02-01", "8"), // oversold
+		tx(t, ledger.TypeBuy, "B", "2024-01-01", "5"),
+	}
+	if err := CheckHoldings(txs, "A"); err == nil {
+		t.Error("A is oversold; want an error")
+	}
+	if err := CheckHoldings(txs, "B"); err != nil {
+		t.Errorf("B is fine and A's problem must not block it; got %v", err)
+	}
+	if err := CheckHoldings(txs); err != nil {
+		t.Errorf("no instruments named → nothing checked; got %v", err)
+	}
+}
+
+func TestRemove_DropsOneMatchingRowOnly(t *testing.T) {
+	a := tx(t, ledger.TypeBuy, "A", "2024-01-01", "5")
+	b := tx(t, ledger.TypeSell, "A", "2024-02-01", "2")
+	got := Remove([]ledger.Transaction{a, b}, a)
+	if len(got) != 1 || got[0].Type != ledger.TypeSell {
+		t.Fatalf("want only the sell left, got %+v", got)
+	}
+	// A target that is not present changes nothing.
+	missing := tx(t, ledger.TypeBuy, "Z", "2024-01-01", "1")
+	if got := Remove([]ledger.Transaction{a, b}, missing); len(got) != 2 {
+		t.Errorf("absent target must leave the list intact, got %d rows", len(got))
+	}
+}
+
+func TestRemove_DoesNotMutateInput(t *testing.T) {
+	a := tx(t, ledger.TypeBuy, "A", "2024-01-01", "5")
+	b := tx(t, ledger.TypeSell, "A", "2024-02-01", "2")
+	in := []ledger.Transaction{a, b}
+	_ = Remove(in, a)
+	if in[0].Type != ledger.TypeBuy || in[1].Type != ledger.TypeSell {
+		t.Errorf("input mutated: %+v", in)
+	}
+}

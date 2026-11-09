@@ -466,7 +466,7 @@ Dependency order: 12.0 → 12.1 → {12.2, 12.3, 12.4} → 12.5 → 12.6. Never-
 
 ---
 
-**12.4 — List, edit and delete manual trades**
+**12.4 — List, edit and delete manual trades** ✅ (2026-11-09; instrument is not editable — delete and re-log to move a trade)
 - `ledger.Store`: `ManualTrades()`, `UpdateManualTrade(id, tx)`, `DeleteManualTrade(id)`, each pinned to `platform = manual AND type IN (buy, sell)` so an imported row can never be mutated; fingerprint recomputed on update; collision → `ErrDuplicateManualTrade`. Routes `POST /trade/update` and `POST /trade/delete`; a "Manual trades logged" disclosure list as for interest credits. Update and delete re-run the oversell guard (deleting a buy may strand a later sell; refuse with a message).
 - **Acceptance:**
   - [ ] An edited trade's fingerprint matches `Transaction.Fingerprint` of the new values.

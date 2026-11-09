@@ -115,6 +115,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/sale", s.handleSale)
 	mux.HandleFunc("/portfolio", s.handlePortfolio)
 	mux.HandleFunc("/trade", s.handleTrade)
+	mux.HandleFunc("/trade/update", s.handleTradeUpdate)
+	mux.HandleFunc("/trade/delete", s.handleTradeDelete)
 	mux.HandleFunc("/portfolio/ticker", s.handlePortfolioTicker)
 	mux.HandleFunc("/portfolio/merge", s.handlePortfolioMerge)
 	mux.HandleFunc("/portfolio/unmerge", s.handlePortfolioUnmerge)
@@ -563,6 +565,24 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	storedTrades, err := s.ledgerStore.ManualTrades()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("loading manual trades: %v", err), http.StatusInternalServerError)
+		return
+	}
+	manualTrades := make([]manualTradeRow, 0, len(storedTrades))
+	for _, t := range storedTrades {
+		manualTrades = append(manualTrades, manualTradeRow{
+			ID:         t.ID,
+			Kind:       string(t.Type),
+			Instrument: t.Instrument,
+			Date:       t.Date.Format("2006-01-02"),
+			Quantity:   t.Quantity.String(),
+			Price:      t.Price.String(),
+			Currency:   t.Currency,
+		})
+	}
+
 	chartJS, err := chartDataJS(summary, disposals)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("building chart data: %v", err), http.StatusInternalServerError)
@@ -607,6 +627,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		ChartDataJS:       chartJS,
 		TradeHoldings:     tradeHoldings(txs),
 		TradeBatchRows:    make([]struct{}, tradeBatchRows),
+		ManualTrades:      manualTrades,
 		Years:             years,
 		SelectedYear:      selectedYear,
 	}); err != nil {
@@ -1071,6 +1092,182 @@ func (s *Server) handleSale(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// manualTradeRow is one hand-entered buy or sell listed on the
+// dashboard, with its row id so the edit and delete forms can target
+// it. Instrument is shown but not editable.
+type manualTradeRow struct {
+	ID         int64
+	Kind       string // "buy" or "sell"
+	Instrument string
+	Date       string // YYYY-MM-DD
+	Quantity   string
+	Price      string
+	Currency   string
+}
+
+// resolveAlias returns tx with its Instrument alias-resolved, the form
+// ledger.Store.All hands the engine and the oversell guard.
+func resolveAlias(tx ledger.Transaction, aliasMap map[string]string) ledger.Transaction {
+	if canonical, ok := aliasMap[tx.Instrument]; ok {
+		tx.Instrument = canonical
+	}
+	return tx
+}
+
+// parseTradeID reads the "id" form field of /trade/update and
+// /trade/delete.
+func parseTradeID(r *http.Request) (int64, error) {
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("invalid id %q", r.FormValue("id"))
+	}
+	return id, nil
+}
+
+// findManualTrade returns the hand-entered trade with the given row id,
+// ok false when there is none (an imported row is never a match).
+func (s *Server) findManualTrade(id int64) (trade ledger.StoredTrade, ok bool, err error) {
+	trades, err := s.ledgerStore.ManualTrades()
+	if err != nil {
+		return ledger.StoredTrade{}, false, err
+	}
+	for _, t := range trades {
+		if t.ID == id {
+			return t, true, nil
+		}
+	}
+	return ledger.StoredTrade{}, false, nil
+}
+
+// handleTradeUpdate corrects a hand-entered trade: POST /trade/update
+// with an `id` and the `kind`, `date`, `quantity`, `price` and
+// `currency` fields /trade takes. The instrument is fixed: to move a
+// trade to another holding, delete it and log it again. The fingerprint
+// is recomputed. An id that isn't a manual trade is a 404, a correction
+// that duplicates another stored transaction a 409, and a validation
+// failure or one that would leave any sell larger than the quantity
+// held at its date a 400 that changes nothing. See SPEC.md §18.
+func (s *Server) handleTradeUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parsing form: %v", err), http.StatusBadRequest)
+		return
+	}
+	id, err := parseTradeID(r)
+	if err != nil {
+		http.Error(w, "trade: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	stored, found, err := s.findManualTrade(id)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading trades: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.Error(w, "trade: no such manual trade", http.StatusNotFound)
+		return
+	}
+
+	tx, err := manualtrade.NewTrade(r.FormValue("kind"), stored.Instrument,
+		r.FormValue("date"), r.FormValue("quantity"), r.FormValue("price"), r.FormValue("currency"))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	existing, aliasMap, err := s.ledgerAndAliases()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: %v", err), http.StatusInternalServerError)
+		return
+	}
+	without := manualtrade.Remove(existing, resolveAlias(stored.Transaction, aliasMap))
+	if err := manualtrade.CheckNoOversell(without, []ledger.Transaction{resolveAlias(tx, aliasMap)}); err != nil {
+		http.Error(w, fmt.Sprintf("trade: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	switch err := s.ledgerStore.UpdateManualTrade(id, tx); {
+	case errors.Is(err, ledger.ErrNotManualTrade):
+		http.Error(w, "trade: no such manual trade", http.StatusNotFound)
+		return
+	case errors.Is(err, ledger.ErrDuplicateManualTrade):
+		http.Error(w, "trade: a trade with those values already exists", http.StatusConflict)
+		return
+	case err != nil:
+		http.Error(w, fmt.Sprintf("trade: updating: %v", err), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// handleTradeDelete removes a hand-entered trade: POST /trade/delete
+// with an `id`. An id that isn't a manual trade is a 404. Deleting a buy
+// that a later sell depends on is a 400 that deletes nothing.
+func (s *Server) handleTradeDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parsing form: %v", err), http.StatusBadRequest)
+		return
+	}
+	id, err := parseTradeID(r)
+	if err != nil {
+		http.Error(w, "trade: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	stored, found, err := s.findManualTrade(id)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: loading trades: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.Error(w, "trade: no such manual trade", http.StatusNotFound)
+		return
+	}
+
+	existing, aliasMap, err := s.ledgerAndAliases()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("trade: %v", err), http.StatusInternalServerError)
+		return
+	}
+	target := resolveAlias(stored.Transaction, aliasMap)
+	if err := manualtrade.CheckHoldings(manualtrade.Remove(existing, target), target.Instrument); err != nil {
+		http.Error(w, fmt.Sprintf("trade: deleting this would break a later sale: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	switch err := s.ledgerStore.DeleteManualTrade(id); {
+	case errors.Is(err, ledger.ErrNotManualTrade):
+		http.Error(w, "trade: no such manual trade", http.StatusNotFound)
+		return
+	case err != nil:
+		http.Error(w, fmt.Sprintf("trade: deleting: %v", err), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// ledgerAndAliases loads every transaction (alias-resolved) and the
+// alias map, the two inputs the oversell guard needs.
+func (s *Server) ledgerAndAliases() ([]ledger.Transaction, map[string]string, error) {
+	existing, err := s.ledgerStore.All()
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading ledger: %w", err)
+	}
+	aliasMap, err := s.aliasStore.All()
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading aliases: %w", err)
+	}
+	return existing, aliasMap, nil
 }
 
 // portfolioPosition is one currently-held instrument on the portfolio
@@ -1913,8 +2110,9 @@ type dashboardData struct {
 	InterestBatchRows []struct{} // blank grid rows to render; only the count matters
 	ChartDataJS       template.JS
 
-	TradeHoldings     []tradeHolding
-	TradeBatchRows    []struct{} // blank grid rows to render; only the count matters
+	TradeHoldings  []tradeHolding
+	TradeBatchRows []struct{} // blank grid rows to render; only the count matters
+	ManualTrades   []manualTradeRow
 	// Years is the tax-year selector's options (descending);
 	// SelectedYear is the active filter, 0 meaning "all years".
 	Years        []int
@@ -2111,6 +2309,46 @@ function addTradeRow() {
 <button type="submit">Log sale</button>
 </form>
 <p class="muted">The sale is matched FIFO against this holding's open lots to compute the CGT gain/loss, which appears in the liability summary below.</p>
+</section>
+
+<section class="card">
+<details class="disclosure">
+<summary>Manual trades logged{{if .ManualTrades}} ({{len .ManualTrades}}){{end}}</summary>
+<div class="disclosure-body">
+{{if .ManualTrades}}
+<table class="data">
+<thead><tr><th>Instrument</th><th>Kind</th><th>Date</th><th>Quantity</th><th>Price</th><th>Currency</th><th></th><th></th></tr></thead>
+<tbody>
+{{range .ManualTrades}}
+<tr>
+<td><span class="sensitive">{{.Instrument}}</span></td>
+<td><select form="mt-{{.ID}}" name="kind"><option value="buy"{{if eq .Kind "buy"}} selected{{end}}>Buy</option><option value="sell"{{if eq .Kind "sell"}} selected{{end}}>Sell</option></select></td>
+<td><input form="mt-{{.ID}}" type="date" name="date" value="{{.Date}}" required></td>
+<td><input form="mt-{{.ID}}" class="sensitive" type="text" name="quantity" inputmode="decimal" value="{{.Quantity}}" required></td>
+<td><input form="mt-{{.ID}}" class="money" type="text" name="price" inputmode="decimal" value="{{.Price}}" required></td>
+<td><input form="mt-{{.ID}}" type="text" name="currency" value="{{.Currency}}" size="4" required></td>
+<td>
+<form id="mt-{{.ID}}" action="/trade/update" method="post">
+<input type="hidden" name="id" value="{{.ID}}">
+<button type="submit">Save</button>
+</form>
+</td>
+<td>
+<form action="/trade/delete" method="post" onsubmit="return confirm('Delete this trade?')">
+<input type="hidden" name="id" value="{{.ID}}">
+<button type="submit">Delete</button>
+</form>
+</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+<p class="muted">Only trades typed in here can be edited or deleted; imported rows are never changed. A change that would leave a sale larger than the quantity held is refused.</p>
+{{else}}
+<p>No manual trades logged yet.</p>
+{{end}}
+</div>
+</details>
 </section>
 
 <section class="card">

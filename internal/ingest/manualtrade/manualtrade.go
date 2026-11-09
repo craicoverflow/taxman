@@ -94,29 +94,41 @@ func NewTrade(kind, instrument, date, quantity, price, currency string) (ledger.
 func CheckNoOversell(existing, added []ledger.Transaction) error {
 	// Only the instruments being written are checked: an existing
 	// problem in an unrelated holding must not block this entry.
-	touched := map[string]bool{}
+	instruments := make([]string, 0, len(added))
 	for _, tx := range added {
-		touched[tx.Instrument] = true
+		instruments = append(instruments, tx.Instrument)
 	}
+	all := make([]ledger.Transaction, 0, len(existing)+len(added))
+	all = append(all, existing...)
+	all = append(all, added...)
+	return CheckHoldings(all, instruments...)
+}
 
+// CheckHoldings reports an error if, within txs, any sell of one of the
+// named instruments exceeds the quantity held at its date. It is the
+// check behind CheckNoOversell, exposed for edits and deletes, where
+// the ledger changes without anything being added (deleting a buy can
+// strand a later sell). Other instruments in txs are ignored.
+func CheckHoldings(txs []ledger.Transaction, instruments ...string) error {
+	wanted := map[string]bool{}
+	for _, in := range instruments {
+		wanted[in] = true
+	}
 	byInstrument := map[string][]ledger.Transaction{}
-	for _, tx := range existing {
-		if touched[tx.Instrument] {
+	for _, tx := range txs {
+		if wanted[tx.Instrument] {
 			byInstrument[tx.Instrument] = append(byInstrument[tx.Instrument], tx)
 		}
 	}
-	for _, tx := range added {
-		byInstrument[tx.Instrument] = append(byInstrument[tx.Instrument], tx)
-	}
 
 	// Check instruments in a fixed order so the error is deterministic.
-	instruments := make([]string, 0, len(byInstrument))
+	names := make([]string, 0, len(byInstrument))
 	for k := range byInstrument {
-		instruments = append(instruments, k)
+		names = append(names, k)
 	}
-	sort.Strings(instruments)
+	sort.Strings(names)
 
-	for _, instrument := range instruments {
+	for _, instrument := range names {
 		txs := byInstrument[instrument]
 		sort.SliceStable(txs, func(i, j int) bool { return txs[i].Date.Before(txs[j].Date) })
 
@@ -135,4 +147,26 @@ func CheckNoOversell(existing, added []ledger.Transaction) error {
 		}
 	}
 	return nil
+}
+
+// Remove returns txs without one row matching target on platform, type,
+// date, instrument, quantity, price and currency. It is how an edit or
+// delete previews the ledger as it would be: ledger.Store.All returns
+// rows without ids, so the target is found by value. If two stored rows
+// match (possible only after an alias merge), removing either gives the
+// same result. txs is not modified.
+func Remove(txs []ledger.Transaction, target ledger.Transaction) []ledger.Transaction {
+	out := make([]ledger.Transaction, 0, len(txs))
+	removed := false
+	for _, tx := range txs {
+		if !removed && tx.Platform == target.Platform && tx.Type == target.Type &&
+			tx.Date.Equal(target.Date) && tx.Instrument == target.Instrument &&
+			tx.Quantity.Equal(target.Quantity) && tx.Price.Equal(target.Price) &&
+			tx.Currency == target.Currency {
+			removed = true
+			continue
+		}
+		out = append(out, tx)
+	}
+	return out
 }
