@@ -251,3 +251,46 @@ func TestHandler_Dashboard_ListsManualTradesWithEditAndDelete(t *testing.T) {
 		}
 	}
 }
+
+const widgetBuyCSV = "Date,Time,Value date,Product,ISIN,Description,FX,Change,,Balance,,Order Id\n" +
+	"15-03-2024,10:32,15-03-2024,WIDGET CORP,IE0000000001,Buy 10 Widget Corp@85.32 EUR (IE0000000001),,EUR,-853.20,EUR,100.00,abc-123\n"
+
+func seedManualWidgetBuy(t *testing.T, conn *sql.DB, qty string) {
+	t.Helper()
+	if _, err := ledger.NewStore(conn).Insert(ledger.Transaction{
+		Platform: ledger.PlatformManual, Type: ledger.TypeBuy,
+		Date: mustDate(t, "2024-03-15"), Instrument: "IE0000000001",
+		Quantity: decimal.RequireFromString(qty), Price: decimal.NewFromInt(1), Currency: "EUR",
+	}); err != nil {
+		t.Fatalf("seeding manual buy: %v", err)
+	}
+}
+
+func TestHandler_Import_WarnsWhenATradeWasAlreadyEnteredByHand(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	seedManualWidgetBuy(t, conn, "10") // price 1 vs the CSV's 85.32: price is ignored
+
+	rec := httptest.NewRecorder()
+	NewServer(conn).Handler().ServeHTTP(rec, newUploadRequest(t, []byte(widgetBuyCSV), "account.csv", "degiro"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (warnings render a summary); body: %s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "entered by hand") || !strings.Contains(body, "IE0000000001") {
+		t.Errorf("expected the near-match warning on the result page; got: %s", body)
+	}
+	// Advisory only: the imported row is still stored alongside the manual one.
+	if n := countTransactions(t, conn); n != 2 {
+		t.Errorf("transactions = %d, want 2 (manual + imported, nothing auto-removed)", n)
+	}
+}
+
+func TestHandler_Import_NoNearMatchWarningForADifferentQuantity(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	seedManualWidgetBuy(t, conn, "9")
+
+	rec := httptest.NewRecorder()
+	NewServer(conn).Handler().ServeHTTP(rec, newUploadRequest(t, []byte(widgetBuyCSV), "account.csv", "degiro"))
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("status = %d, want 303 (clean import redirects); body: %s", rec.Code, rec.Body.String())
+	}
+}

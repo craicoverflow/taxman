@@ -795,6 +795,14 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Warn (never block) when a parsed trade matches one already entered
+	// by hand, which the fingerprint cannot dedupe (SPEC.md §18).
+	if nearMatches, err := ingest.NearMatchWarnings(s.conn, txs); err != nil {
+		warnings = append(warnings, fmt.Sprintf("could not check for trades entered by hand: %v", err))
+	} else {
+		warnings = append(warnings, nearMatches...)
+	}
+
 	inserted, skipped, err := ingest.Store(s.conn, txs)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("storing transactions from %s (platform: %s): %v", header.Filename, resolvedPlatform, err), http.StatusInternalServerError)

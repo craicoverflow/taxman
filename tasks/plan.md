@@ -480,7 +480,7 @@ Dependency order: 12.0 → 12.1 → {12.2, 12.3, 12.4} → 12.5 → 12.6. Never-
 
 ---
 
-**12.5 — Import near-match warning**
+**12.5 — Import near-match warning** ✅ (2026-11-09; `ingest.NearMatches` + `NearMatchWarnings`)
 - `ingest.NearMatches(manual []ledger.Transaction, parsed []ledger.Transaction) []string` — flags a parsed row whose alias-resolved instrument, type, date and quantity equal a manual trade's; **price is ignored**. Used by `handleImport` (the existing warnings page) and `taxman import`, including `--dry-run`. Warn only: rows are still inserted by the existing fingerprint rules and nothing is auto-merged or auto-deleted. The message names the manual entry and says to delete it on the dashboard if it is the same trade.
 - **Acceptance:**
   - [ ] Importing a CSV containing a trade already entered by hand → warning listing both; the import row is still stored.
