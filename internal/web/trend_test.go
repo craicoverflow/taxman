@@ -200,7 +200,8 @@ func TestHandler_PortfolioTrend_JSON(t *testing.T) {
 			Pct   []json.RawMessage `json:"pct"`
 			Value []json.RawMessage `json:"value"`
 		} `json:"holdings"`
-		Notes []string `json:"notes"`
+		Notes   []string       `json:"notes"`
+		Missing []trendMissing `json:"missing"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v; body: %s", err, rec.Body.String())
@@ -218,8 +219,8 @@ func TestHandler_PortfolioTrend_JSON(t *testing.T) {
 	if p := string(got.Holdings[0].Pct[1]); p != "10.00" {
 		t.Errorf("pct on 2023-01-03 = %s, want 10.00", p)
 	}
-	if len(got.Notes) != 1 || !strings.Contains(got.Notes[0], "VANGUARD FTSE AW has no ticker") {
-		t.Errorf("notes = %v, want the unmapped holding called out", got.Notes)
+	if len(got.Missing) != 1 || got.Missing[0].Instrument != "IE00B3RBWM25" || got.Missing[0].Reason != "no ticker mapped" {
+		t.Errorf("missing = %+v, want the unmapped holding listed for a mapping form", got.Missing)
 	}
 	if strings.Join(fh.calls, ",") != "AAPL" {
 		t.Errorf("history requested for %v; only mapped symbols may be looked up", fh.calls)
@@ -238,8 +239,18 @@ func TestHandler_PortfolioTrend_HistoryFailure_IsANoteNotAnError(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "APPLE INC (AAPL): no price history") {
-		t.Errorf("body = %s", rec.Body.String())
+	var got trendSeries
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var apple *trendMissing
+	for i := range got.Missing {
+		if got.Missing[i].Instrument == "US0378331005" {
+			apple = &got.Missing[i]
+		}
+	}
+	if apple == nil || apple.Symbol != "AAPL" || !strings.Contains(apple.Reason, "no price history") {
+		t.Errorf("missing = %+v, want AAPL listed with its symbol so it can be remapped", got.Missing)
 	}
 }
 
@@ -255,7 +266,7 @@ func TestHandler_PortfolioTrend_RejectsPOST(t *testing.T) {
 func TestHandler_Portfolio_RendersTrendCard(t *testing.T) {
 	conn := openMigratedTestDB(t)
 	body := portfolioBody(t, conn, "/portfolio")
-	for _, want := range []string{`id="portfolio-trend"`, `fetch("/portfolio/trend.json"`, "chart.umd.min.js"} {
+	for _, want := range []string{`id="portfolio-trend"`, `id="trend-missing"`, `fetch("/portfolio/trend.json"`, "chart.umd.min.js"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("portfolio page missing %q", want)
 		}

@@ -71,6 +71,20 @@ type trendSeries struct {
 	Holdings []trendLine `json:"holdings"`
 	Notes    []string    `json:"notes"`
 	Stale    bool        `json:"stale"`
+
+	// Missing are holdings left out for want of a usable ticker — none
+	// mapped, or a mapped symbol the provider has no history for. The
+	// page offers a mapping form for each, including holdings already
+	// sold (the holdings table only offers one for what's still held).
+	Missing []trendMissing `json:"missing"`
+}
+
+// trendMissing is one holding the chart could not include, and why.
+type trendMissing struct {
+	Instrument string `json:"instrument"`
+	Label      string `json:"label"`
+	Symbol     string `json:"symbol,omitempty"`
+	Reason     string `json:"reason"`
 }
 
 var hundred = decimal.NewFromInt(100)
@@ -123,7 +137,7 @@ func holdingSteps(txs []ledger.Transaction) ([]qtyStep, error) {
 // per-holding and overall series described at the top of this file.
 func buildTrend(holdings []trendHolding, today time.Time) trendSeries {
 	today = truncDay(today)
-	out := trendSeries{Dates: []string{}, Holdings: []trendLine{}, Notes: []string{}}
+	out := trendSeries{Dates: []string{}, Holdings: []trendLine{}, Notes: []string{}, Missing: []trendMissing{}}
 
 	type state struct {
 		h         trendHolding
@@ -305,10 +319,12 @@ func (s *Server) handlePortfolioTrend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	notes := []string{}
+	missing := []trendMissing{}
 	type job struct {
-		holding trendHolding
-		hist    prices.History
-		err     error
+		instrument string
+		holding    trendHolding
+		hist       prices.History
+		err        error
 	}
 	var jobs []*job
 	for _, instrument := range distinctInstruments(tradeTxs) {
@@ -319,10 +335,10 @@ func (s *Server) handlePortfolioTrend(w http.ResponseWriter, r *http.Request) {
 		}
 		symbol, ok := mappings[instrument]
 		if !ok {
-			notes = append(notes, fmt.Sprintf("%s has no ticker mapped — not in the chart", label))
+			missing = append(missing, trendMissing{Instrument: instrument, Label: label, Reason: "no ticker mapped"})
 			continue
 		}
-		jobs = append(jobs, &job{holding: trendHolding{Label: label, Symbol: symbol, Txs: htxs}})
+		jobs = append(jobs, &job{instrument: instrument, holding: trendHolding{Label: label, Symbol: symbol, Txs: htxs}})
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
@@ -344,7 +360,8 @@ func (s *Server) handlePortfolioTrend(w http.ResponseWriter, r *http.Request) {
 	stale := false
 	for _, j := range jobs {
 		if j.err != nil {
-			notes = append(notes, fmt.Sprintf("%s (%s): no price history — %v", j.holding.Label, j.holding.Symbol, j.err))
+			missing = append(missing, trendMissing{Instrument: j.instrument, Label: j.holding.Label, Symbol: j.holding.Symbol,
+				Reason: fmt.Sprintf("no price history: %v", j.err)})
 			continue
 		}
 		closes, missing, firstMissing := s.closesToEUR(j.hist)
@@ -363,6 +380,7 @@ func (s *Server) handlePortfolioTrend(w http.ResponseWriter, r *http.Request) {
 	series := buildTrend(holdings, time.Now())
 	series.Notes = append(notes, series.Notes...)
 	series.Stale = stale
+	series.Missing = missing
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

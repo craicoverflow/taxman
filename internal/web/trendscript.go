@@ -60,6 +60,54 @@ const portfolioTrendJS = `
 			li.textContent = n;
 			notesEl.appendChild(li);
 		});
+		renderMissing();
+	}
+
+	// One mapping form per holding the chart had to leave out — including
+	// ones already sold, which the holdings tables below never list. It
+	// posts to the same user-entered-only /portfolio/ticker endpoint.
+	function renderMissing() {
+		var box = document.getElementById("trend-missing");
+		var missing = data.missing || [];
+		box.innerHTML = "";
+		if (!missing.length) return;
+		var h = document.createElement("h3");
+		h.textContent = "Not in the chart — add a ticker to include them";
+		box.appendChild(h);
+		var p = document.createElement("p");
+		p.className = "muted";
+		p.textContent = "Includes holdings you've since sold, so the trend covers everything back to your first purchase. Use the symbol the price source knows, e.g. AAPL, VWRL.L, VWCE.DE.";
+		box.appendChild(p);
+		var table = document.createElement("table");
+		table.className = "data";
+		table.innerHTML = "<thead><tr><th>Holding</th><th>Why</th><th>Ticker</th></tr></thead>";
+		var tbody = document.createElement("tbody");
+		missing.forEach(function (m) {
+			var tr = document.createElement("tr");
+			var td1 = document.createElement("td");
+			td1.textContent = m.label === m.instrument ? m.label : m.label + " (" + m.instrument + ")";
+			var td2 = document.createElement("td");
+			td2.textContent = m.reason;
+			var td3 = document.createElement("td");
+			var form = document.createElement("form");
+			form.action = "/portfolio/ticker";
+			form.method = "post";
+			var hid = document.createElement("input");
+			hid.type = "hidden"; hid.name = "instrument"; hid.value = m.instrument;
+			var sym = document.createElement("input");
+			sym.type = "text"; sym.name = "symbol"; sym.required = true;
+			sym.className = "sensitive";
+			if (m.symbol) sym.value = m.symbol; else sym.placeholder = "AAPL";
+			var btn = document.createElement("button");
+			btn.type = "submit";
+			btn.textContent = m.symbol ? "Remap" : "Map";
+			form.appendChild(hid); form.appendChild(sym); form.appendChild(btn);
+			td3.appendChild(form);
+			tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+			tbody.appendChild(tr);
+		});
+		table.appendChild(tbody);
+		box.appendChild(table);
 	}
 
 	function startIndex(dates) {
