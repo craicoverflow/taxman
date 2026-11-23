@@ -2264,9 +2264,6 @@ function addInterestRow() {
 </section>
 
 <section class="card">
-<h2>Log RSU vest</h2>
-<form class="form-row" action="/rsu" method="post">
-<section class="card">
 <h2>Log trade</h2>
 <form action="/trade" method="post">
 <table class="data" id="trade-batch">
@@ -2301,6 +2298,9 @@ function addTradeRow() {
 <p class="muted">Buys and sells are matched FIFO like imported trades and restated to euro at the trade-date rate. A sell larger than what you hold on that date is refused. Fees not included &mdash; taxman does not model them yet, so a trade logged here carries no fee, same as an imported one. Pick an existing holding, or type a new instrument (an ISIN or a ticker) and say how it is taxed &mdash; taxman never guesses that. Leave blank rows empty.</p>
 </section>
 
+<section class="card">
+<h2>Log RSU vest</h2>
+<form class="form-row" action="/rsu" method="post">
 <label>Symbol: <input type="text" name="symbol" placeholder="ACME" required></label>
 <label>Vest date: <input type="date" name="date" required></label>
 <label>Quantity: <input type="text" name="quantity" inputmode="decimal" required></label>
