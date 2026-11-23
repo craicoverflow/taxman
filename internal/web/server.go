@@ -121,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/trade", s.handleTrade)
 	mux.HandleFunc("/trade/update", s.handleTradeUpdate)
 	mux.HandleFunc("/trade/delete", s.handleTradeDelete)
+	mux.HandleFunc("/anniversaries.ics", s.handleAnniversariesICS)
 	mux.HandleFunc("/portfolio/trend.json", s.handlePortfolioTrend)
 	mux.HandleFunc("/portfolio/ticker", s.handlePortfolioTicker)
 	mux.HandleFunc("/portfolio/merge", s.handlePortfolioMerge)
@@ -2107,6 +2108,7 @@ type anniversaryRow struct {
 	Date         string
 	Quantity     string
 	Reached      bool
+	Countdown    string // "in N days" / "tomorrow" for an upcoming row; "" once reached
 	HaveValue    bool
 	ValuePerUnit string
 	Currency     string
@@ -2209,7 +2211,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 <td>{{if .Description}}{{.Description}} ({{.Instrument}}){{else}}{{.Instrument}}{{end}}</td>
 <td>{{.LotAcquired}}</td>
 <td>{{.Quantity}}</td>
-<td>{{if not .Reached}}upcoming{{else if .HaveValue}}charged{{else}}<strong>needs a market value</strong>{{end}}</td>
+<td>{{if not .Reached}}upcoming{{if .Countdown}} ({{.Countdown}}){{end}}{{else if .HaveValue}}charged{{else}}<strong>needs a market value</strong>{{end}}</td>
 <td>
 {{if .Reached}}
 {{if .HaveValue}}{{.ValuePerUnit}} {{.Currency}}{{end}}
@@ -2231,6 +2233,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 {{else}}
 <p><em>No fund lot has an 8-year anniversary yet. Classify a holding EXIT_TAX_FUND for its lots to appear here.</em></p>
 {{end}}
+{{if .Anniversaries}}<p class="muted"><a href="/anniversaries.ics">Add upcoming anniversaries to your calendar (.ics)</a> &mdash; holding name and date only, with reminders 30 and 7 days before; no quantities or values.</p>{{end}}
 </section>
 
 <section class="card">
@@ -2825,6 +2828,9 @@ func (s *Server) anniversarySchedule(instruments []string, byInstrument map[stri
 				Quantity:    d.Quantity.String(),
 				Reached:     d.Reached,
 			}
+			if !d.Reached {
+				row.Countdown = anniversaryCountdown(d.AnniversaryDate, time.Now().UTC())
+			}
 
 			value, ok, err := s.valuesStore.Get(instrument, d.AnniversaryDate)
 			if err != nil {
@@ -2854,4 +2860,21 @@ func (s *Server) anniversarySchedule(instruments []string, byInstrument map[stri
 	})
 
 	return out, needValues, nil
+}
+
+// anniversaryCountdown says how far off an upcoming anniversary is, in
+// whole calendar days from today: "tomorrow" or "in N days". Today or
+// earlier is "" — that row is reached, and its status says so.
+func anniversaryCountdown(date, today time.Time) string {
+	d := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	t := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
+	days := int(d.Sub(t).Hours() / 24)
+	switch {
+	case days <= 0:
+		return ""
+	case days == 1:
+		return "tomorrow"
+	default:
+		return fmt.Sprintf("in %d days", days)
+	}
 }
