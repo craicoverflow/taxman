@@ -148,10 +148,21 @@ func TestBuildTrend_NoHoldings_EmptyNotNil(t *testing.T) {
 	}
 }
 
-// fakeHistorian serves canned series by symbol.
+// fakeHistorian serves canned series by symbol: series for History,
+// intraday[span] for Intraday.
 type fakeHistorian struct {
-	series map[string]prices.History
-	calls  []string
+	series   map[string]prices.History
+	intraday map[prices.Span]map[string]prices.History
+	calls    []string
+}
+
+func (f *fakeHistorian) Intraday(_ context.Context, symbol string, span prices.Span) (prices.History, error) {
+	f.calls = append(f.calls, string(span)+":"+symbol)
+	h, ok := f.intraday[span][symbol]
+	if !ok {
+		return prices.History{}, fmt.Errorf("no %s prices for %q", span, symbol)
+	}
+	return h, nil
 }
 
 func (f *fakeHistorian) History(_ context.Context, symbol string) (prices.History, error) {
@@ -270,5 +281,99 @@ func TestHandler_Portfolio_RendersTrendCard(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("portfolio page missing %q", want)
 		}
+	}
+}
+
+func at(t *testing.T, s string) time.Time {
+	t.Helper()
+	v, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t.Fatalf("parsing %q: %v", s, err)
+	}
+	return v
+}
+
+func ticks(t *testing.T, pairs ...string) []eurClose {
+	t.Helper()
+	var out []eurClose
+	for i := 0; i < len(pairs); i += 2 {
+		out = append(out, eurClose{Date: at(t, pairs[i]), Price: mustDecimal(t, pairs[i+1])})
+	}
+	return out
+}
+
+func TestBuildWindowTrend_BasesAtWindowStart(t *testing.T) {
+	// Window 2024-03-04 09:00 → 2024-03-05 09:00 (a "1D" view).
+	// A trades in the window: last price before the start is 100, then
+	// 102 and 99. B's market hasn't opened in the window: it stays flat
+	// at its last price, not at an older session's move.
+	from, to := at(t, "2024-03-04T09:00:00Z"), at(t, "2024-03-05T09:00:00Z")
+	got := buildWindowTrend([]trendHolding{
+		{Label: "A", Txs: []ledger.Transaction{trendTx(t, ledger.TypeBuy, "2024-01-02", "10", "50")},
+			Closes: ticks(t, "2024-03-01T16:00:00Z", "90", "2024-03-04T08:55:00Z", "100", "2024-03-04T10:00:00Z", "102", "2024-03-04T16:00:00Z", "99")},
+		{Label: "B", Txs: []ledger.Transaction{trendTx(t, ledger.TypeBuy, "2024-01-02", "10", "50")},
+			Closes: ticks(t, "2024-03-01T21:00:00Z", "100")},
+		{Label: "Sold long ago", Txs: []ledger.Transaction{
+			trendTx(t, ledger.TypeBuy, "2023-01-02", "1", "1"), trendTx(t, ledger.TypeSell, "2023-02-01", "1", "1")},
+			Closes: ticks(t, "2024-03-04T10:00:00Z", "5")},
+	}, from, to)
+
+	if d := strings.Join(got.Dates, " "); d != "2024-03-04T09:00:00Z 2024-03-04T10:00:00Z 2024-03-04T16:00:00Z" {
+		t.Fatalf("dates = %s", d)
+	}
+	if len(got.Holdings) != 2 {
+		t.Fatalf("holdings = %d, want 2 (not the one sold before the window)", len(got.Holdings))
+	}
+	checks := []struct{ name, got, want string }{
+		{"A pct", strs(got.Holdings[0].Pct), "0.00 2.00 -1.00"},
+		{"B pct", strs(got.Holdings[1].Pct), "0.00 0.00 0.00"},
+		// Equal values (10×100 each) → overall is half of A's move.
+		{"overall pct", strs(got.Overall.Pct), "0.00 1.00 -0.50"},
+		{"overall value", strs(got.Overall.Value), "2000.00 2020.00 1990.00"},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
+		}
+	}
+}
+
+func TestHandler_PortfolioTrend_Span(t *testing.T) {
+	conn := openMigratedTestDB(t)
+	portfolioSeedTwoHeld(t, conn)
+	mustUpsertTicker(t, conn, "US0378331005", "AAPL")
+	now := time.Now().UTC().Truncate(time.Minute)
+	fh := &fakeHistorian{intraday: map[prices.Span]map[string]prices.History{
+		prices.Span1D: {"AAPL": {Currency: "EUR", Closes: []prices.Close{
+			{Date: now.Add(-30 * time.Hour), Price: decimal.NewFromInt(100)},
+			{Date: now.Add(-time.Hour), Price: decimal.NewFromInt(105)},
+		}}},
+	}}
+	s := NewServer(conn)
+	s.historian = fh
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/portfolio/trend.json?span=1d", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var got trendSeries
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Dates) != 2 || len(got.Holdings) != 1 {
+		t.Fatalf("dates=%v holdings=%d, want window start + one tick, one holding", got.Dates, len(got.Holdings))
+	}
+	if p := strs(got.Holdings[0].Pct); p != "0.00 5.00" {
+		t.Errorf("pct = %q, want based at the last price before the window", p)
+	}
+	if strings.Join(fh.calls, ",") != "1d:AAPL" {
+		t.Errorf("calls = %v, want only the intraday fetch", fh.calls)
+	}
+
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/portfolio/trend.json?span=1h", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown span: status = %d, want 400", rec.Code)
 	}
 }

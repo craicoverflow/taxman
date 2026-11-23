@@ -2497,6 +2497,8 @@ Total market value: <strong>{{eur .TotalValue}}</strong>
 <button type="button" data-value="value" aria-pressed="false">Value &euro;</button>
 </div>
 <div class="seg" role="group" aria-label="Range" data-group="range">
+<button type="button" data-value="1d" aria-pressed="false">1D</button>
+<button type="button" data-value="1w" aria-pressed="false">1W</button>
 <button type="button" data-value="1m" aria-pressed="false">1M</button>
 <button type="button" data-value="3m" aria-pressed="false">3M</button>
 <button type="button" data-value="6m" aria-pressed="false">6M</button>
@@ -2513,7 +2515,7 @@ Total market value: <strong>{{eur .TotalValue}}</strong>
 <div class="trend-summary" id="trend-summary"></div>
 <div class="chart-card chart-tall"><canvas id="portfolio-trend" aria-label="Portfolio market trend chart" role="img"></canvas></div>
 <p class="muted" id="trend-status">Loading price history&hellip;</p>
-<p class="muted">Each holding's line is its euro market price change since the day it was first bought; buying more or selling doesn't move it. <strong>Overall</strong> chains each day's quantity-weighted price move of what was held, so new money in isn't counted as a gain. Inside a shorter range, lines restart at 0% from the range's first day. Click a legend entry to hide or show a line. <em>Value &euro;</em> plots market value against the cost basis of open lots.</p>
+<p class="muted">Each holding's line is its euro market price change since the day it was first bought; buying more or selling doesn't move it. <strong>Overall</strong> chains each day's quantity-weighted price move of what was held, so new money in isn't counted as a gain. Inside a shorter range, lines restart at 0% from the range's start; 1D and 1W use intraday prices over the last 24 hours and 7 days. Click a legend entry to hide or show a line. <em>Value &euro;</em> plots market value against the cost basis of open lots.</p>
 <ul class="audit-list" id="trend-notes"></ul>
 <div id="trend-missing"></div>
 </section>

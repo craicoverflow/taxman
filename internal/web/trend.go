@@ -136,7 +136,24 @@ func holdingSteps(txs []ledger.Transaction) ([]qtyStep, error) {
 // starts at the first purchase and ends at today, and derives the
 // per-holding and overall series described at the top of this file.
 func buildTrend(holdings []trendHolding, today time.Time) trendSeries {
-	today = truncDay(today)
+	return buildSeries(holdings, time.Time{}, truncDay(today), false)
+}
+
+// buildWindowTrend is buildTrend over a short rolling window of
+// intraday prices (the chart's 1D and 1W ranges). The axis starts at
+// from, where every line is 0%: each holding's base is its last price
+// at or before from, so a market that hasn't traded since is flat
+// rather than showing an older session's move. Only holdings held at
+// some point in the window are included.
+func buildWindowTrend(holdings []trendHolding, from, to time.Time) trendSeries {
+	return buildSeries(holdings, from.UTC(), to.UTC(), true)
+}
+
+// buildSeries is the shared core. With window false the axis is daily
+// from the earliest first purchase to end; with window true it is from,
+// then every price timestamp in (from, end]. Quantities and cost come
+// from day-granular transaction steps either way.
+func buildSeries(holdings []trendHolding, from, end time.Time, window bool) trendSeries {
 	out := trendSeries{Dates: []string{}, Holdings: []trendLine{}, Notes: []string{}, Missing: []trendMissing{}}
 
 	type state struct {
@@ -171,6 +188,14 @@ func buildTrend(holdings []trendHolding, today time.Time) trendSeries {
 		if last := steps[len(steps)-1]; !last.Qty.IsPositive() {
 			st.end = last.Date
 		}
+		if window {
+			// Held at some point in the window, else not on this chart.
+			if st.firstBuy.After(truncDay(end)) || (!st.end.IsZero() && st.end.Before(truncDay(from))) {
+				continue
+			}
+			states = append(states, st)
+			continue
+		}
 		// A purchase on a weekend or market holiday is priced from the
 		// next session without comment; a longer gap means the
 		// provider's history doesn't reach back that far.
@@ -188,13 +213,18 @@ func buildTrend(holdings []trendHolding, today time.Time) trendSeries {
 		return out
 	}
 
-	// The axis is every trading day any holding has a close for, from
-	// the first purchase to today.
+	// The axis is every timestamp any holding has a price for, from the
+	// first purchase (or the window start, itself a point) to end.
 	seen := map[time.Time]bool{}
 	var axis []time.Time
+	if window {
+		start = from
+		seen[from] = true
+		axis = append(axis, from)
+	}
 	for _, st := range states {
 		for _, c := range st.h.Closes {
-			if c.Date.Before(start) || c.Date.After(today) || seen[c.Date] {
+			if c.Date.Before(start) || c.Date.After(end) || seen[c.Date] {
 				continue
 			}
 			seen[c.Date] = true
@@ -221,7 +251,11 @@ func buildTrend(holdings []trendHolding, today time.Time) trendSeries {
 	index := decimal.NewFromInt(1)
 
 	for k, d := range axis {
-		out.Dates = append(out.Dates, d.Format("2006-01-02"))
+		if window {
+			out.Dates = append(out.Dates, d.Format(time.RFC3339))
+		} else {
+			out.Dates = append(out.Dates, d.Format("2006-01-02"))
+		}
 		num1, den := decimal.Zero, decimal.Zero
 		totalValue, totalCost := decimal.Zero, decimal.Zero
 		anyActive := false
@@ -248,7 +282,8 @@ func buildTrend(holdings []trendHolding, today time.Time) trendSeries {
 				den = den.Add(st.prevQty.Mul(st.prevPrice))
 			}
 
-			active := !d.Before(st.firstBuy) && (st.end.IsZero() || !d.After(st.end))
+			day := truncDay(d)
+			active := !day.Before(st.firstBuy) && (st.end.IsZero() || !day.After(st.end))
 			if active && st.havePrice {
 				if !st.haveBase {
 					st.base, st.haveBase = st.price, true
@@ -291,10 +326,26 @@ const historyFetchConcurrency = 4
 // history requests never hold up (or break) the page itself. A holding
 // with no ticker, or whose history can't be fetched or converted to
 // euro, is left out with a note saying why — never guessed.
+//
+// ?span=1d or ?span=1w switches from daily closes since the first
+// purchase to intraday prices over the last 24 hours or 7 days (see
+// buildWindowTrend); any other span is a 400.
 func (s *Server) handlePortfolioTrend(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	span := prices.Span(r.URL.Query().Get("span"))
+	var window time.Duration
+	switch span {
+	case "":
+	case prices.Span1D:
+		window = 24 * time.Hour
+	case prices.Span1W:
+		window = 7 * 24 * time.Hour
+	default:
+		http.Error(w, fmt.Sprintf("trend: unknown span %q (want 1d or 1w)", span), http.StatusBadRequest)
 		return
 	}
 	txs, err := s.ledgerStore.All()
@@ -351,7 +402,11 @@ func (s *Server) handlePortfolioTrend(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			j.hist, j.err = s.historian.History(ctx, j.holding.Symbol)
+			if span == "" {
+				j.hist, j.err = s.historian.History(ctx, j.holding.Symbol)
+			} else {
+				j.hist, j.err = s.historian.Intraday(ctx, j.holding.Symbol, span)
+			}
 		}(j)
 	}
 	wg.Wait()
@@ -364,20 +419,26 @@ func (s *Server) handlePortfolioTrend(w http.ResponseWriter, r *http.Request) {
 				Reason: fmt.Sprintf("no price history: %v", j.err)})
 			continue
 		}
-		closes, missing, firstMissing := s.closesToEUR(j.hist)
+		closes, skipped, firstSkipped := s.closesToEUR(j.hist)
 		if len(closes) == 0 {
 			notes = append(notes, fmt.Sprintf("%s (%s): no EUR reference rate for %s — not in the chart", j.holding.Label, j.holding.Symbol, j.hist.Currency))
 			continue
 		}
-		if missing > 0 {
-			notes = append(notes, fmt.Sprintf("%s (%s): %d day(s) skipped with no %s→EUR rate (first %s)", j.holding.Label, j.holding.Symbol, missing, j.hist.Currency, firstMissing))
+		if skipped > 0 {
+			notes = append(notes, fmt.Sprintf("%s (%s): %d price(s) skipped with no %s→EUR rate (first %s)", j.holding.Label, j.holding.Symbol, skipped, j.hist.Currency, firstSkipped))
 		}
 		stale = stale || j.hist.Stale
 		j.holding.Closes = closes
 		holdings = append(holdings, j.holding)
 	}
 
-	series := buildTrend(holdings, time.Now())
+	now := time.Now()
+	var series trendSeries
+	if span == "" {
+		series = buildTrend(holdings, now)
+	} else {
+		series = buildWindowTrend(holdings, now.Add(-window), now)
+	}
 	series.Notes = append(notes, series.Notes...)
 	series.Stale = stale
 	series.Missing = missing

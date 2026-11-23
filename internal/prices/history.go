@@ -46,11 +46,36 @@ type History struct {
 	Stale    bool
 }
 
-// Historian returns a symbol's daily price history. internal/web
-// depends on this interface so handler tests can inject a fake with no
-// network.
+// Historian returns a symbol's price history: daily closes over years
+// (History) or intraday prices over the last day or week (Intraday).
+// internal/web depends on this interface so handler tests can inject a
+// fake with no network.
 type Historian interface {
 	History(ctx context.Context, symbol string) (History, error)
+	Intraday(ctx context.Context, symbol string, span Span) (History, error)
+}
+
+// Span is a short intraday lookback for Intraday.
+type Span string
+
+const (
+	// Span1D covers at least the last 24 hours at 5-minute resolution.
+	Span1D Span = "1d"
+	// Span1W covers at least the last 7 days at 30-minute resolution.
+	Span1W Span = "1w"
+)
+
+// intradaySpec is the fixed provider query and cache TTL for a Span.
+// Like historyRange, the query is a constant: no ledger-derived time
+// ever leaves the process, only the symbol. Each range is wider than
+// its span (a 24-hour window can reach back over a weekend into the
+// previous session), and the caller trims locally.
+var intradaySpec = map[Span]struct {
+	query string
+	ttl   time.Duration
+}{
+	Span1D: {"range=5d&interval=5m", 5 * time.Minute},
+	Span1W: {"range=1mo&interval=30m", 15 * time.Minute},
 }
 
 // HistoryCache is the durable counterpart of Cache for daily series:
@@ -97,7 +122,7 @@ func (q *HTTPQuoter) History(ctx context.Context, symbol string) (History, error
 		}
 	}
 
-	h, err := q.fetchYahooHistory(ctx, symbol)
+	h, err := q.fetchYahooSeries(ctx, symbol, "range="+historyRange+"&interval=1d", true)
 	if err != nil {
 		if cached {
 			stale := entry.history
@@ -118,20 +143,59 @@ func (q *HTTPQuoter) History(ctx context.Context, symbol string) (History, error
 	return h, nil
 }
 
-// fetchYahooHistory reads the daily series from Yahoo's v8 chart JSON:
+// Intraday returns symbol's prices at intraday resolution covering at
+// least span, oldest first; each Close.Date is the bar's UTC timestamp.
+// It is cached in-process only (a short TTL per span — the chart is
+// meant to be current); on a failed fetch the last cached series is
+// returned with Stale set, or an error when none exists.
+func (q *HTTPQuoter) Intraday(ctx context.Context, symbol string, span Span) (History, error) {
+	spec, ok := intradaySpec[span]
+	if !ok {
+		return History{}, fmt.Errorf("prices: unknown intraday span %q", span)
+	}
+	now := q.now()
+	key := symbol + "|" + string(span)
+
+	q.mu.Lock()
+	entry, cached := q.historyCache[key]
+	q.mu.Unlock()
+	if cached && now.Sub(entry.fetchedAt) < spec.ttl {
+		return entry.history, nil
+	}
+
+	h, err := q.fetchYahooSeries(ctx, symbol, spec.query, false)
+	if err != nil {
+		if cached {
+			stale := entry.history
+			stale.Stale = true
+			return stale, nil
+		}
+		return History{}, fmt.Errorf("prices: %s prices for %s: %w", span, symbol, err)
+	}
+	h.Symbol = symbol
+	h.AsOf = now
+
+	q.mu.Lock()
+	q.historyCache[key] = historyEntry{history: h, fetchedAt: now}
+	q.mu.Unlock()
+	return h, nil
+}
+
+// fetchYahooSeries reads a price series from Yahoo's v8 chart JSON:
 //
 //	{"chart":{"result":[{"meta":{"currency":"USD","gmtoffset":-18000},
 //	  "timestamp":[1704465000,...],
 //	  "indicators":{"quote":[{"close":[181.18,null,...]}]}}],"error":null}}
 //
-// A null close (a halted or not-yet-settled day) is skipped. Each
-// timestamp is shifted by the exchange's gmtoffset before taking the
-// calendar date, so a US session is dated by its own trading day, not
-// the UTC day it ends on. London listings quoted in pence ("GBp"/"GBX")
-// are scaled to pounds so the series is in an ISO 4217 currency.
-func (q *HTTPQuoter) fetchYahooHistory(ctx context.Context, symbol string) (History, error) {
-	u := strings.TrimRight(q.yahooURL, "/") + "/" + url.PathEscape(symbol) +
-		"?range=" + historyRange + "&interval=1d"
+// query is a fixed range/interval pair. A null close (a halted or
+// not-yet-settled bar) is skipped. With daily set, each timestamp is
+// shifted by the exchange's gmtoffset before taking the calendar date,
+// so a US session is dated by its own trading day, not the UTC day it
+// ends on; otherwise the bar's UTC timestamp is kept. London listings
+// quoted in pence ("GBp"/"GBX") are scaled to pounds so the series is
+// in an ISO 4217 currency.
+func (q *HTTPQuoter) fetchYahooSeries(ctx context.Context, symbol, query string, daily bool) (History, error) {
+	u := strings.TrimRight(q.yahooURL, "/") + "/" + url.PathEscape(symbol) + "?" + query
 	resp, err := q.get(ctx, u)
 	if err != nil {
 		return History{}, err
@@ -191,11 +255,16 @@ func (q *HTTPQuoter) fetchYahooHistory(ctx context.Context, symbol string) (Hist
 		if err != nil || !price.IsPositive() {
 			continue
 		}
-		t := time.Unix(res.Timestamp[i]+res.Meta.GMTOffset, 0).UTC()
-		day := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+		var day time.Time
+		if daily {
+			t := time.Unix(res.Timestamp[i]+res.Meta.GMTOffset, 0).UTC()
+			day = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+		} else {
+			day = time.Unix(res.Timestamp[i], 0).UTC()
+		}
 		if !day.After(last) {
-			// Yahoo appends the live session as an extra point that can
-			// share a date with the last settled close; keep the later.
+			// Yahoo appends the live price as an extra point that can
+			// share a date (or bar) with the last settled one; keep the later.
 			if day.Equal(last) {
 				out.Closes[len(out.Closes)-1].Price = price.Mul(scale)
 			}

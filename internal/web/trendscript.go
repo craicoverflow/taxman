@@ -21,6 +21,10 @@ const portfolioTrendJS = `
 	var state = {mode: "pct", range: "all", show: "all"};
 	var data = null, chart = null;
 	var hidden = {}; // legend toggles survive re-renders, keyed by label
+	// 1D and 1W are intraday windows served by ?span=, fetched on first
+	// use and kept for the life of the page.
+	var spans = {}, spanLoading = {};
+	function isSpan() { return state.range === "1d" || state.range === "1w"; }
 
 	document.querySelectorAll("#trend-card .seg").forEach(function (group) {
 		var key = group.getAttribute("data-group");
@@ -111,7 +115,7 @@ const portfolioTrendJS = `
 	}
 
 	function startIndex(dates) {
-		if (state.range === "all") return 0;
+		if (state.range === "all" || isSpan()) return 0;
 		var last = new Date(dates[dates.length - 1] + "T00:00:00Z");
 		var from = new Date(last.getTime());
 		switch (state.range) {
@@ -131,7 +135,7 @@ const portfolioTrendJS = `
 		var base = null;
 		return arr.slice(i0).map(function (v) {
 			if (v === null) return null;
-			if (state.range === "all") return Number(v);
+			if (state.range === "all" || isSpan()) return Number(v);
 			var f = 1 + Number(v) / 100;
 			if (base === null) base = f;
 			return (f / base - 1) * 100;
@@ -162,10 +166,10 @@ const portfolioTrendJS = `
 		return s;
 	}
 
-	function renderSummary(i0) {
+	function renderSummary(d, i0) {
 		summaryEl.innerHTML = "";
-		var overall = lastNonNull(pctSeries(data.overall.pct, i0));
-		var ranked = data.holdings.map(function (h) {
+		var overall = lastNonNull(pctSeries(d.overall.pct, i0));
+		var ranked = d.holdings.map(function (h) {
 			return {label: h.label, v: lastNonNull(pctSeries(h.pct, i0))};
 		}).filter(function (h) { return h.v !== null; });
 		ranked.sort(function (a, b) { return b.v - a.v; });
@@ -182,9 +186,44 @@ const portfolioTrendJS = `
 		}
 	}
 
+	var fmtTime = {hour: "2-digit", minute: "2-digit"};
+	function spanLabel(iso) {
+		var t = new Date(iso);
+		if (state.range === "1d") return t.toLocaleTimeString(undefined, fmtTime);
+		return t.toLocaleDateString(undefined, {weekday: "short", day: "numeric"}) + " " + t.toLocaleTimeString(undefined, fmtTime);
+	}
+
 	function render() {
-		var i0 = startIndex(data.dates);
-		var labels = data.dates.slice(i0);
+		var d = data;
+		if (isSpan()) {
+			var span = state.range;
+			d = spans[span];
+			if (!d) {
+				statusEl.textContent = "Loading " + (span === "1d" ? "the last 24 hours" : "the last 7 days") + "…";
+				if (!spanLoading[span]) {
+					spanLoading[span] = true;
+					fetch("/portfolio/trend.json?span=" + span, {headers: {"Accept": "application/json"}})
+						.then(function (r) {
+							if (!r.ok) throw new Error("HTTP " + r.status);
+							return r.json();
+						})
+						.then(function (j) { spans[span] = j; if (state.range === span) render(); })
+						.catch(function (e) {
+							spanLoading[span] = false;
+							if (state.range === span) statusEl.textContent = "Could not load intraday prices: " + e.message;
+						});
+				}
+				return;
+			}
+			if (!d.dates.length) {
+				if (chart) { chart.destroy(); chart = null; }
+				summaryEl.innerHTML = "";
+				statusEl.textContent = "No holdings priced in this window.";
+				return;
+			}
+		}
+		var i0 = startIndex(d.dates);
+		var labels = isSpan() ? d.dates.map(spanLabel) : d.dates.slice(i0);
 		var text = cssVar("--text", "#1b1e24");
 		var datasets = [];
 		var line = function (label, series, color, extra) {
@@ -198,15 +237,15 @@ const portfolioTrendJS = `
 		};
 
 		if (state.mode === "pct") {
-			datasets.push(line("Overall", pctSeries(data.overall.pct, i0), text, {borderWidth: 3, order: 0}));
+			datasets.push(line("Overall", pctSeries(d.overall.pct, i0), text, {borderWidth: 3, order: 0}));
 		} else {
-			datasets.push(line("Overall value", numSeries(data.overall.value, i0), text,
+			datasets.push(line("Overall value", numSeries(d.overall.value, i0), text,
 				{borderWidth: 3, order: 0, fill: "origin", backgroundColor: chartFill}));
-			datasets.push(line("Cost basis (open lots)", numSeries(data.overall.cost, i0), cssVar("--text-muted", "#666"),
+			datasets.push(line("Cost basis (open lots)", numSeries(d.overall.cost, i0), cssVar("--text-muted", "#666"),
 				{borderDash: [6, 4], order: 1}));
 		}
 		if (state.show === "all") {
-			data.holdings.forEach(function (h, i) {
+			d.holdings.forEach(function (h, i) {
 				var color = chartPalette[i % chartPalette.length];
 				var series = state.mode === "pct" ? pctSeries(h.pct, i0) : numSeries(h.value, i0);
 				datasets.push(line(h.label, series, color, {order: 2}));
@@ -242,10 +281,15 @@ const portfolioTrendJS = `
 		if (chart) chart.destroy();
 		chart = new Chart(canvas, {type: "line", data: {labels: labels, datasets: datasets}, options: opts});
 
-		renderSummary(i0);
-		var asOf = labels[labels.length - 1];
-		statusEl.textContent = "Daily closes from " + labels[0] + " to " + asOf +
-			(data.stale ? " — some served from cache because the price source was unreachable." : ".");
+		renderSummary(d, i0);
+		if (isSpan()) {
+			statusEl.textContent = (state.range === "1d" ? "5-minute prices over the last 24 hours" : "30-minute prices over the last 7 days") +
+				", each line from 0% at the window start; markets that haven't traded since stay flat" +
+				(d.stale ? " — some served from cache because the price source was unreachable." : ".");
+		} else {
+			statusEl.textContent = "Daily closes from " + labels[0] + " to " + labels[labels.length - 1] +
+				(d.stale ? " — some served from cache because the price source was unreachable." : ".");
+		}
 		if (priv && state.mode === "value") statusEl.textContent += " Values hidden in privacy mode.";
 	}
 })();

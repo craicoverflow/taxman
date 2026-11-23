@@ -154,3 +154,44 @@ func TestHistory_DurableCache_SurvivesRestart(t *testing.T) {
 		t.Errorf("last close = %+v", h.Closes[2])
 	}
 }
+
+func TestIntraday_KeepsTimestamps_FixedQuery_Cached(t *testing.T) {
+	p := newProviders(t)
+	var gotQuery string
+	p.primaryFn = func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"chart":{"result":[{"meta":{"currency":"GBp","gmtoffset":0},
+"timestamp":[1709542800,1709543100,1709543100],
+"indicators":{"quote":[{"close":[100.0,null,101.5]}]}}],"error":null}}`))
+	}
+	clock := &fakeClock{t: time.Date(2024, 3, 4, 12, 0, 0, 0, time.UTC)}
+	q := p.quoter(WithClock(clock.Now))
+
+	h, err := q.Intraday(context.Background(), "VWRL.L", Span1D)
+	if err != nil {
+		t.Fatalf("Intraday: %v", err)
+	}
+	if gotQuery != "range=5d&interval=5m" {
+		t.Errorf("query = %q, want the fixed 1d spec", gotQuery)
+	}
+	if h.Currency != "GBP" || len(h.Closes) != 2 {
+		t.Fatalf("got %s with %d points", h.Currency, len(h.Closes))
+	}
+	if !h.Closes[0].Date.Equal(time.Unix(1709542800, 0).UTC()) || !h.Closes[1].Price.Equal(decimal.RequireFromString("1.015")) {
+		t.Errorf("closes = %+v", h.Closes)
+	}
+
+	clock.Advance(time.Minute)
+	if _, err := q.Intraday(context.Background(), "VWRL.L", Span1D); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Intraday(context.Background(), "VWRL.L", Span1W); err != nil {
+		t.Fatal(err)
+	}
+	if hits := atomic.LoadInt64(&p.primaryHits); hits != 2 {
+		t.Errorf("hits = %d, want 2 (1d cached, 1w fetched separately)", hits)
+	}
+	if _, err := q.Intraday(context.Background(), "VWRL.L", Span("1h")); err == nil {
+		t.Error("unknown span: want an error")
+	}
+}
