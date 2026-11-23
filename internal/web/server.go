@@ -79,13 +79,16 @@ type Server struct {
 	// tests: NewServer wires the real HTTP client and fx.Rate, and
 	// internal web tests overwrite these fields with fakes so no test
 	// touches the network or depends on the embedded FX file's age.
-	quoter prices.Quoter
-	rate   func(currency string, on time.Time) (decimal.Decimal, error)
+	quoter    prices.Quoter
+	historian prices.Historian // daily closes for the portfolio trend chart
+	rate      func(currency string, on time.Time) (decimal.Decimal, error)
 }
 
 // NewServer wraps an already-migrated *sql.DB. Callers are
 // responsible for having run db.Up beforehand (see internal/db).
 func NewServer(conn *sql.DB) *Server {
+	priceCache := prices.NewSQLiteCache(conn)
+	quoter := prices.NewHTTPQuoter(prices.WithCache(priceCache), prices.WithHistoryCache(priceCache))
 	return &Server{
 		conn:          conn,
 		ledgerStore:   ledger.NewStore(conn),
@@ -94,7 +97,8 @@ func NewServer(conn *sql.DB) *Server {
 		tickerStore:   tickers.NewStore(conn),
 		aliasStore:    aliases.NewStore(conn),
 		valuesStore:   valuations.NewStore(conn),
-		quoter:        prices.NewHTTPQuoter(prices.WithCache(prices.NewSQLiteCache(conn))),
+		quoter:        quoter,
+		historian:     quoter,
 		rate:          fx.Rate,
 	}
 }
@@ -117,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/trade", s.handleTrade)
 	mux.HandleFunc("/trade/update", s.handleTradeUpdate)
 	mux.HandleFunc("/trade/delete", s.handleTradeDelete)
+	mux.HandleFunc("/portfolio/trend.json", s.handlePortfolioTrend)
 	mux.HandleFunc("/portfolio/ticker", s.handlePortfolioTicker)
 	mux.HandleFunc("/portfolio/merge", s.handlePortfolioMerge)
 	mux.HandleFunc("/portfolio/unmerge", s.handlePortfolioUnmerge)
@@ -2484,6 +2489,34 @@ Total market value: <strong>{{eur .TotalValue}}</strong>
 </p>
 </section>
 
+<section class="card" id="trend-card">
+<h2>Market trend since first purchase</h2>
+<div class="trend-controls">
+<div class="seg" role="group" aria-label="Measure" data-group="mode">
+<button type="button" data-value="pct" aria-pressed="true">% price change</button>
+<button type="button" data-value="value" aria-pressed="false">Value &euro;</button>
+</div>
+<div class="seg" role="group" aria-label="Range" data-group="range">
+<button type="button" data-value="1m" aria-pressed="false">1M</button>
+<button type="button" data-value="3m" aria-pressed="false">3M</button>
+<button type="button" data-value="6m" aria-pressed="false">6M</button>
+<button type="button" data-value="ytd" aria-pressed="false">YTD</button>
+<button type="button" data-value="1y" aria-pressed="false">1Y</button>
+<button type="button" data-value="3y" aria-pressed="false">3Y</button>
+<button type="button" data-value="all" aria-pressed="true">All</button>
+</div>
+<div class="seg" role="group" aria-label="Series" data-group="show">
+<button type="button" data-value="all" aria-pressed="true">Overall + holdings</button>
+<button type="button" data-value="overall" aria-pressed="false">Overall only</button>
+</div>
+</div>
+<div class="trend-summary" id="trend-summary"></div>
+<div class="chart-card chart-tall"><canvas id="portfolio-trend" aria-label="Portfolio market trend chart" role="img"></canvas></div>
+<p class="muted" id="trend-status">Loading price history&hellip;</p>
+<p class="muted">Each holding's line is its euro market price change since the day it was first bought; buying more or selling doesn't move it. <strong>Overall</strong> chains each day's quantity-weighted price move of what was held, so new money in isn't counted as a gain. Inside a shorter range, lines restart at 0% from the range's first day. Click a legend entry to hide or show a line. <em>Value &euro;</em> plots market value against the cost basis of open lots.</p>
+<ul class="audit-list" id="trend-notes"></ul>
+</section>
+
 {{if .Priced}}
 {{if .Treemap}}
 <section class="card">
@@ -2625,11 +2658,14 @@ Total market value: <strong>{{eur .TotalValue}}</strong>
 </section>
 {{end}}
 
-{{if .Priced}}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script>
-const portfolioData = {{.ChartDataJS}};
 themeCharts();
+`+portfolioTrendJS+`
+</script>
+{{if .Priced}}
+<script>
+const portfolioData = {{.ChartDataJS}};
 new Chart(document.getElementById("portfolio-pie"), {
 	type: "pie",
 	data: {

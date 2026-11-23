@@ -257,6 +257,12 @@ answer "what is this worth today", which the tax dashboard never does.
 - `internal/prices` must stay a **leaf**: no import of `engine`,
   `audit`, or `ledger`. Quotes are **never** persisted to `audit` and
   **never** feed a tax computation.
+- The **market-trend chart** (SPEC §9.1, `internal/web/trend.go`,
+  `GET /portfolio/trend.json`) plots each holding's euro price change
+  since its first purchase plus a time-weighted overall line, from
+  daily closes (`prices.History`, Yahoo `range=10y` — a fixed range, so
+  still only the symbol leaves the process), cached in `price_history`
+  (migration 0010).
 
 ---
 
@@ -288,9 +294,10 @@ From SPEC §6 — the ones most likely to bite:
   network calls (a CDN `<script>` in the UI is not a `go.mod` dep; a
   provider SDK would be).
 - A non-backward-compatible DB schema change against ingested history.
-- `report --format pdf` or a historical portfolio-value time series —
-  both deferred, not just unimplemented. (The deemed-disposal
-  anniversary schedule is now a dashboard table; a *charted* timeline
+- `report --format pdf` — deferred, not just unimplemented. (The
+  portfolio market-trend time series is built, SPEC §9.1; widening
+  what its history fetch sends outbound is still ask-first. The
+  deemed-disposal anniversary schedule is now a dashboard table; a *charted* timeline
   is still deferred.)
 - A second credentialed price provider, or widening what Finnhub
   receives.

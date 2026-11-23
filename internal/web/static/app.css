@@ -488,6 +488,66 @@ td strong {
 	font-variant-numeric: tabular-nums;
 }
 
+.chart-card.chart-tall {
+	height: 420px;
+}
+
+/* ---- portfolio trend controls ------------------------------------ */
+
+.trend-controls {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px 16px;
+	align-items: center;
+	margin: 4px 0 14px;
+}
+
+.seg {
+	display: inline-flex;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	overflow: hidden;
+}
+
+.seg button {
+	padding: 5px 11px;
+	font-size: 0.82rem;
+	font-weight: 500;
+	color: var(--text-muted);
+	background: var(--surface-2);
+	border: none;
+	border-left: 1px solid var(--border-strong);
+	border-radius: 0;
+	cursor: pointer;
+}
+
+.seg button:first-child {
+	border-left: none;
+}
+
+.seg button:hover {
+	color: var(--text);
+	filter: none;
+}
+
+.seg button[aria-pressed="true"] {
+	color: var(--accent);
+	background: var(--accent-weak);
+}
+
+.trend-summary {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 18px;
+	margin: 0 0 10px;
+	font-size: 0.9rem;
+}
+
+.trend-summary .gain-pos,
+.trend-summary .gain-neg {
+	font-weight: 600;
+}
+
 /* ---- audit trail --------------------------------------------- */
 
 .audit-list {

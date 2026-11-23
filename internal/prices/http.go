@@ -62,9 +62,12 @@ type HTTPQuoter struct {
 	now          func() time.Time
 	persist      Cache // durable last-known-price store; nil disables it
 
+	historyPersist HistoryCache // durable daily-series store; nil disables it
+
 	mu            sync.Mutex
 	cache         map[string]cacheEntry
 	currencyCache map[string]string // symbol → listing currency (Finnhub profile), "" once looked up and unknown
+	historyCache  map[string]historyEntry
 }
 
 type cacheEntry struct {
@@ -117,6 +120,7 @@ func NewHTTPQuoter(opts ...Option) *HTTPQuoter {
 		now:           time.Now,
 		cache:         map[string]cacheEntry{},
 		currencyCache: map[string]string{},
+		historyCache:  map[string]historyEntry{},
 	}
 	for _, opt := range opts {
 		opt(q)

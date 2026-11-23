@@ -23,7 +23,7 @@ Enda, personally. Single-user tool. Not designed, licensed, or hardened for anyo
 - Output numbers are cross-checked against the existing hand-built spreadsheet and, where feasible, an independent Tax-Wizard run, before being trusted for filing.
 
 ### Non-goals (v1)
-Dividend/distribution income tracking, multi-user/SaaS support, broker API integrations beyond a possible future IBKR Flex Query, ROS e-filing, and any LLM-performed tax arithmetic. Any historical portfolio-value-over-time chart is deferred past the current dashboard/portfolio pass (§9). See [§6](#6-boundaries) for how the core list is enforced as a hard boundary, not just deferred scope.
+Dividend/distribution income tracking, multi-user/SaaS support, broker API integrations beyond a possible future IBKR Flex Query, ROS e-filing, and any LLM-performed tax arithmetic. A historical portfolio-value-over-time chart is built as the portfolio page's market-trend chart (§9.1); a deemed-disposal timeline *chart* stays deferred. See [§6](#6-boundaries) for how the core list is enforced as a hard boundary, not just deferred scope.
 
 ---
 
@@ -176,7 +176,7 @@ taxman/
 - Before a DB schema change that isn't backward-compatible with already-ingested ledger history.
 - Before committing or pushing to git (standing instruction, not specific to this project).
 - Before implementing anything listed under Non-goals above, even as a "small addition" — confirm scope has actually changed rather than assuming a non-goal has become in-scope.
-- Before building the `report --format pdf` output or a historical portfolio-value-over-time chart — both currently deferred, not just unimplemented by omission.
+- Before building the `report --format pdf` output — deferred, not just unimplemented by omission. (The portfolio market-trend chart, §9.1, cleared this gate by explicit request on 2026-11-23; changing what it sends outbound needs the same treatment.)
 - Before adding a price provider that requires an API key, account, or any credential **beyond the one already sanctioned**: Finnhub, enabled only by the `TAXMAN_FINNHUB_TOKEN` env var, off by default, sending only the symbol + token (§9). Any second credentialed provider, or widening what Finnhub sends, is ask-first.
 
 ### Never do (no exceptions, not just "ask first")
@@ -295,7 +295,7 @@ The dashboard answers "what do I owe". It never answers "what is this worth toda
 - **Staleness / gaps surfaced, not hidden**: a "prices as of HH:MM" stamp; per-position marker when a quote is stale; the unpriced/unmapped list visible on the page.
 
 ### Out of scope (this pass)
-- Historical portfolio-value-over-time (any time series) — deferred (§1, §6).
+- Historical portfolio-value-over-time — deferred in this pass; since built as §9.1.
 - Intraday auto-refresh, websockets, server push — page is accurate as of last load.
 - Pricing cash, savings, deposits, or any interest-bearing balance — no market price exists; these never appear.
 - Auto-guessing a ticker from instrument name or ISIN — user-entered mappings only (§6).
@@ -339,6 +339,21 @@ EUR conversion reuses `fx.Rate(currency, time.Now())`; monetary output is `€`,
 - **Always**: keep `internal/prices` free of any `engine`/`audit`/`ledger` import — it is a leaf utility like `fx`. Convert every quote to EUR before it reaches a template. Show the price timestamp and the unmapped/unpriced list on the page.
 - **Ask first**: before adding a provider that needs a key/account; before adding a `go.mod` dependency for price fetching; before persisting quotes anywhere beyond the in-process cache; before adding any historical/time-series storage.
 - **Never**: send anything but the ticker symbol (and, if set, the Finnhub token) outbound — no quantities, cost basis, account IDs, or ledger rows. Never infer a mapping from instrument metadata. Never let a price-fetch failure blank the page or block the dashboard. Never log or persist the token.
+
+### 9.1 Market trend chart
+
+**Status:** built (2026-11-23, explicit request: "an interactive graph plotting price rises and falls in my portfolio — separate and overall, since the first purchase").
+
+A card on `/portfolio` plotting, from the first purchase to today:
+
+- **Per holding** — the euro market price's % change since the close on the day it was first bought. Buying more or selling does not move the line; a fully sold holding's line stops at its last sale.
+- **Overall** — a time-weighted return: each day's quantity-weighted price move of what was held at the previous close, chained. New money in is not a gain; only the market is.
+- **Value €** toggle — overall and per-holding euro market value, against the cost basis of open lots (`engine.OpenPositions` over the transactions to that day).
+- Range buttons (1M…3Y, All; a shorter range re-bases lines to 0% at its start), overall-only toggle, legend click to hide a line. Privacy mode hides the value axis, tooltips and summary figures like every other chart.
+
+**Data.** `prices.HTTPQuoter.History` fetches Yahoo's v8 chart endpoint with a **fixed** `range=10y&interval=1d` — the symbol is still the only datum that leaves the process; no ledger-derived date is ever sent. Closes are converted to euro at each day's ECB rate (`fx.Rate`); a day with no rate is dropped and noted, never filled with another day's rate. London pence listings (`GBp`/`GBX`) are scaled to GBP. Series are cached in-process for 6 h and written through to `price_history` (migration 0010, additive) so the chart survives a restart during provider rate-limiting, served `stale` when the provider is down.
+
+**Delivery.** `GET /portfolio/trend.json`, fetched by the page after it renders, so a slow or failing history fetch never blocks or blanks `/portfolio`. Unmapped holdings, failed fetches and history that starts after a purchase are listed under the chart, never guessed. Nothing here touches `engine` tax paths, `taxrules` or `audit`.
 
 ---
 
